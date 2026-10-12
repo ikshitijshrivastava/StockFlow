@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StockBill – Phase 1</title>
+<style>
+:root{--bg:#f3f5f2;--card:#fff;--ink:#1d2a24;--mut:#66756d;--line:#d9e0db;--pri:#14594a;--pri2:#0e4337;--bad:#b3261e;--ok:#1b7a3d}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--pri);color:#fff;padding:10px 14px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:5}
+header b{font-size:17px;flex:1}header small{opacity:.85}
+nav{display:flex;gap:4px;padding:8px 10px;overflow-x:auto;background:#e6ece8}
+nav button{border:0;background:none;padding:8px 14px;border-radius:8px;font:inherit;color:var(--ink);cursor:pointer;white-space:nowrap}
+nav button.on{background:var(--pri);color:#fff}
+main{max-width:980px;margin:0 auto;padding:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+h2{margin:0 0 10px;font-size:18px}
+.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+label{display:block;font-size:12px;color:var(--mut);margin-bottom:2px}
+input,select{width:100%;padding:9px;border:1px solid var(--line);border-radius:7px;font:inherit;background:#fff}
+button.b{background:var(--pri);color:#fff;border:0;border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer}
+button.b:hover{background:var(--pri2)}button.s{background:#fff;color:var(--pri);border:1px solid var(--pri)}
+button.d{background:#fff;color:var(--bad);border:1px solid var(--bad)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.tw{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{color:var(--mut);font-weight:600}
+.msg{padding:9px 12px;border-radius:8px;margin-bottom:10px;background:#e8f3ec;color:var(--ok)}.msg.e{background:#fbe9e7;color:var(--bad)}
+.login{max-width:380px;margin:8vh auto}.mut{color:var(--mut);font-size:13px}.hide{display:none}
+</style></head><body>
+<div id="app"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+// Firebase web config for project stockflow-d27fe
+const CFG={apiKey:"AIzaSyBHPncMFGpHJx85bhcKhH94hVexld40A-g",authDomain:"stockflow-d27fe.firebaseapp.com",projectId:"stockflow-d27fe",storageBucket:"stockflow-d27fe.firebasestorage.app",messagingSenderId:"420455056832",appId:"1:420455056832:web:d32dce871120c9f9653425"};
+
+firebase.initializeApp(CFG);
+const auth=firebase.auth(),db=firebase.firestore();
+const ROLES={admin:"Admin",manager:"Warehouse manager",keeper:"Warehouse keeper",billdesk:"Bill desk"};
+let me=null,tab="items",setupMode=false,items=[],whs=[],users=[],stock=[],note="",editing=null;
+const $=s=>document.querySelector(s);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const canEdit=()=>me&&(me.role==="admin"||me.role==="manager");
+const isAdmin=()=>me&&me.role==="admin";
+function say(t,e){note=`<div class="msg ${e?"e":""}">${esc(t)}</div>`;draw()}
+function err(e){say(e.message||String(e),true)}
+
+auth.onAuthStateChanged(async u=>{
+  if(setupMode)return;
+  if(!u){me=null;return loginView()}
+  try{
+    const d=await db.doc("users/"+u.uid).get();
+    if(!d.exists){me=null;return loginView("This account has no role yet. Ask your admin to add you.",true)}
+    me={uid:u.uid,...d.data()};await loadAll();draw();
+  }catch(e){loginView(e.message,true)}
+});
+
+async function loginView(m,bad){
+  let first=false;
+  try{first=!(await db.doc("meta/setup").get()).exists}catch(e){}
+  $("#app").innerHTML=`<div class="login card"><h2>StockBill</h2>
+  ${m?`<div class="msg ${bad?"e":""}">${esc(m)}</div>`:""}
+  ${first?`<div class="field"><label>Your name (first-time setup only)</label><input id="nm"></div>`:""}
+  <label>Email</label><input id="em" type="email"><label style="margin-top:8px">Password</label><input id="pw" type="password">
+  <div class="row"><button class="b" onclick="login()">Log in</button>
+  ${first?`<button class="b s" onclick="setup()">Create first admin</button>`:""}
+  ${auth.currentUser?`<button class="b s" onclick="auth.signOut()">Log out</button>`:""}</div>
+  ${first?`<p class="mut">No admin exists yet. Use “Create first admin” once; after that, only admins can add users.</p>`:""}</div>`;
+}
+window.login=()=>auth.signInWithEmailAndPassword($("#em").value.trim(),$("#pw").value).catch(e=>loginView(e.message,true));
+window.setup=async()=>{
+  const em=$("#em").value.trim(),pw=$("#pw").value,nm=$("#nm").value.trim()||"Admin";
+  try{
+    setupMode=true;
+    const c=await auth.createUserWithEmailAndPassword(em,pw);
+    const b=db.batch();
+    b.set(db.doc("users/"+c.user.uid),{name:nm,email:em,role:"admin"});
+    b.set(db.doc("meta/setup"),{by:c.user.uid,at:Date.now()});
+    await b.commit();
+    setupMode=false;me={uid:c.user.uid,name:nm,email:em,role:"admin"};await loadAll();draw();
+  }catch(e){setupMode=false;loginView(e.message,true)}
+};
+
+async function loadAll(){
+  const [i,w,st]=await Promise.all([db.collection("items").orderBy("code").get(),db.collection("warehouses").orderBy("name").get(),db.collection("stock").get()]);
+  stock=st.docs.map(d=>d.data()).sort((a,b)=>b.at-a.at);
+  items=i.docs.map(d=>({id:d.id,...d.data()}));whs=w.docs.map(d=>({id:d.id,...d.data()}));
+  if(isAdmin()){const u=await db.collection("users").get();users=u.docs.map(d=>({id:d.id,...d.data()}))}
+}
+
+function draw(){
+  const tabs=[["items","Items"],["whs","Warehouses"],["stock","Stock"]];if(isAdmin())tabs.push(["users","Users"]);
+  $("#app").innerHTML=`<header><b>StockBill</b><small>${esc(me.name)} · ${ROLES[me.role]}</small>
+  <button class="b s" onclick="auth.signOut()">Log out</button></header>
+  <nav>${tabs.map(t=>`<button class="${tab===t[0]?"on":""}" onclick="tab='${t[0]}';note='';editing=null;draw()">${t[1]}</button>`).join("")}</nav>
+  <main>${note}${tab==="items"?itemsView():tab==="whs"?whView():tab==="stock"?stockView():usersView()}</main>`;
+}
+
+/* ---------- ITEMS ---------- */
+function itemsView(){
+  const e=editing?items.find(x=>x.id===editing):{};
+  const form=canEdit()?`<div class="card"><h2>${editing?"Edit item":"Add item"}</h2>
+  <div class="g">
+  <div><label>Item code</label><input id="ic" value="${esc(e.code)}" ${editing?"disabled":""}></div>
+  <div><label>Item name</label><input id="in" value="${esc(e.name)}"></div>
+  <div><label>Unit (pcs, kg…)</label><input id="iu" value="${esc(e.unit)}"></div>
+  <div><label>HSN code</label><input id="ih" value="${esc(e.hsn)}"></div>
+  <div><label>GST %</label><input id="ig" type="number" value="${esc(e.gst)}"></div>
+  <div><label>Rate (₹)</label><input id="ir" type="number" value="${esc(e.rate)}"></div></div>
+  <div class="row"><button class="b" onclick="saveItem()">Save item</button>${editing?`<button class="b s" onclick="editing=null;draw()">Cancel</button>`:""}</div></div>
+  <div class="card"><h2>Upload from Excel</h2>
+  <p class="mut">Download the template, fill it, and upload. Rows with an existing code update that item.</p>
+  <div class="row"><button class="b s" onclick="tpl()">Download Excel template</button>
+  <input type="file" id="xf" accept=".xlsx,.xls,.csv" style="max-width:260px"><button class="b" onclick="upl()">Upload</button></div></div>`:"";
+  return form+`<div class="card"><h2>Items (${items.length})</h2><div class="tw"><table>
+  <tr><th>Code</th><th>Name</th><th>Unit</th><th>HSN</th><th>GST%</th><th>Rate</th>${canEdit()?"<th></th>":""}</tr>
+  ${items.map(i=>`<tr><td>${esc(i.code)}</td><td>${esc(i.name)}</td><td>${esc(i.unit)}</td><td>${esc(i.hsn)}</td><td>${esc(i.gst)}</td><td>${esc(i.rate)}</td>
+  ${canEdit()?`<td><button class="b s" onclick="editing='${esc(i.id)}';draw()">Edit</button> <button class="b d" onclick="delItem('${esc(i.id)}')">Delete</button></td>`:""}</tr>`).join("")||`<tr><td colspan="7">No items yet. Add one or upload an Excel file.</td></tr>`}
+  </table></div></div>`;
+}
+const iid=c=>String(c).trim().toUpperCase().replace(/[\/\s]+/g,"-");
+window.saveItem=async()=>{
+  const code=($("#ic").value||"").trim(),name=$("#in").value.trim();
+  if(!code||!name)return say("Item code and name are required.",true);
+  const d={code,name,unit:$("#iu").value.trim()||"pcs",hsn:$("#ih").value.trim(),gst:Number($("#ig").value)||0,rate:Number($("#ir").value)||0};
+  try{await db.doc("items/"+iid(code)).set(d,{merge:true});editing=null;await loadAll();say("Item saved.")}catch(e){err(e)}
+};
+window.delItem=async id=>{if(!confirm("Delete this item?"))return;try{await db.doc("items/"+id).delete();await loadAll();say("Item deleted.")}catch(e){err(e)}};
+window.tpl=()=>{
+  const ws=XLSX.utils.aoa_to_sheet([["Code","Name","Unit","HSN","GST%","Rate"],["ITM001","Sample item","pcs","1905",18,100]]);
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Items");XLSX.writeFile(wb,"items_template.xlsx");
+};
+window.upl=async()=>{
+  const f=$("#xf").files[0];if(!f)return say("Choose a file first.",true);
+  try{
+    const wb=XLSX.read(await f.arrayBuffer());
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""});
+    const ok=[],bad=[];
+    rows.forEach((r,n)=>{
+      const code=String(r.Code||"").trim(),name=String(r.Name||"").trim();
+      if(!code||!name)return bad.push(n+2);
+      ok.push({code,name,unit:String(r.Unit||"pcs"),hsn:String(r.HSN||""),gst:Number(r["GST%"])||0,rate:Number(r.Rate)||0});
+    });
+    for(let i=0;i<ok.length;i+=400){
+      const b=db.batch();ok.slice(i,i+400).forEach(d=>b.set(db.doc("items/"+iid(d.code)),d,{merge:true}));await b.commit();
+    }
+    await loadAll();say(`${ok.length} items saved.${bad.length?` Skipped rows (missing code or name): ${bad.join(", ")}.`:""}`,bad.length>0&&!ok.length);
+  }catch(e){err(e)}
+};
+
+/* ---------- WAREHOUSES ---------- */
+function whView(){
+  return (canEdit()?`<div class="card"><h2>Add warehouse</h2><div class="g">
+  <div><label>Name</label><input id="wn"></div><div><label>Location</label><input id="wl"></div>
+  <div><label>Incharge</label><input id="wi"></div></div>
+  <div class="row"><button class="b" onclick="addWh()">Save warehouse</button></div></div>`:"")+
+  `<div class="card"><h2>Warehouses (${whs.length})</h2><div class="tw"><table><tr><th>Name</th><th>Location</th><th>Incharge</th>${canEdit()?"<th></th>":""}</tr>
+  ${whs.map(w=>`<tr><td>${esc(w.name)}</td><td>${esc(w.location)}</td><td>${esc(w.incharge)}</td>${canEdit()?`<td><button class="b d" onclick="delWh('${esc(w.id)}')">Delete</button></td>`:""}</tr>`).join("")||`<tr><td colspan="4">No warehouses yet. Add your first one above.</td></tr>`}
+  </table></div></div>`;
+}
+window.addWh=async()=>{
+  const name=$("#wn").value.trim();if(!name)return say("Warehouse name is required.",true);
+  try{await db.collection("warehouses").add({name,location:$("#wl").value.trim(),incharge:$("#wi").value.trim()});await loadAll();say("Warehouse saved.")}catch(e){err(e)}
+};
+window.delWh=async id=>{if(!confirm("Delete this warehouse?"))return;try{await db.doc("warehouses/"+id).delete();await loadAll();say("Warehouse deleted.")}catch(e){err(e)}};
+
+/* ---------- STOCK LEDGER ---------- */
+const MT={in:"Stock in",out:"Stock out",return:"Returned",damage:"Damaged"};
+const wName=id=>(whs.find(w=>w.id===id)||{}).name||id, iName=id=>(items.find(x=>x.id===id)||{}).name||id;
+function balances(){const m={};stock.forEach(s=>{const k=s.wh+"|"+s.item,o=m[k]||(m[k]={in:0,out:0,return:0,damage:0});o[s.type]+=s.qty});return m}
+const avail=o=>o?o.in+o.return-o.out-o.damage:0;
+function stockView(){
+  const b=balances(),canPost=me.role!=="billdesk";
+  const opt=(a,f)=>a.map(x=>`<option value="${esc(x.id)}">${esc(f(x))}</option>`).join("");
+  return (canPost?`<div class="card"><h2>Record stock movement</h2><div class="g">
+  <div><label>Warehouse</label><select id="sw">${opt(whs,w=>w.name)}</select></div>
+  <div><label>Item</label><select id="si">${opt(items,x=>x.code+" – "+x.name)}</select></div>
+  <div><label>Movement</label><select id="st">${Object.entries(MT).map(t=>`<option value="${t[0]}">${t[1]}</option>`).join("")}</select></div>
+  <div><label>Quantity</label><input id="sq" type="number" min="0"></div>
+  <div><label>Reference (invoice, challan…)</label><input id="sr"></div></div>
+  <div class="row"><button class="b" onclick="addMove()">Save movement</button></div></div>`:"")+
+  `<div class="card"><h2>Stock by warehouse</h2><div class="tw"><table><tr><th>Warehouse</th><th>Item</th><th>In</th><th>Out</th><th>Returned</th><th>Damaged</th><th>Available</th></tr>
+  ${Object.entries(b).map(([k,o])=>{const[w,i]=k.split("|");return`<tr><td>${esc(wName(w))}</td><td>${esc(iName(i))}</td><td>${o.in}</td><td>${o.out}</td><td>${o.return}</td><td>${o.damage}</td><td><b>${avail(o)}</b></td></tr>`}).join("")||`<tr><td colspan="7">No stock yet. Record a “Stock in” movement above.</td></tr>`}</table></div></div>
+  <div class="card"><h2>Recent movements</h2><div class="tw"><table><tr><th>Date</th><th>Warehouse</th><th>Item</th><th>Type</th><th>Qty</th><th>Ref</th><th>By</th></tr>
+  ${stock.slice(0,20).map(s=>`<tr><td>${new Date(s.at).toLocaleString()}</td><td>${esc(wName(s.wh))}</td><td>${esc(iName(s.item))}</td><td>${MT[s.type]}</td><td>${s.qty}</td><td>${esc(s.ref)}</td><td>${esc(s.by)}</td></tr>`).join("")||`<tr><td colspan="7">No movements yet.</td></tr>`}</table></div></div>`;
+}
+window.addMove=async()=>{
+  const wh=$("#sw").value,item=$("#si").value,type=$("#st").value,qty=Number($("#sq").value);
+  if(!wh||!item)return say("Add a warehouse and an item first.",true);
+  if(!(qty>0))return say("Enter a quantity above zero.",true);
+  const have=avail(balances()[wh+"|"+item]);
+  if((type==="out"||type==="damage")&&qty>have)return say(`Only ${have} available in this warehouse.`,true);
+  try{await db.collection("stock").add({wh,item,type,qty,ref:$("#sr").value.trim(),by:me.name,at:Date.now()});await loadAll();say("Movement saved.")}catch(e){err(e)}
+};
+
+/* ---------- USERS (admin) ---------- */
+function usersView(){
+  return `<div class="card"><h2>Add user</h2><div class="g">
+  <div><label>Name</label><input id="un"></div><div><label>Email</label><input id="ue" type="email"></div>
+  <div><label>Temporary password (6+ chars)</label><input id="up"></div>
+  <div><label>Role</label><select id="ur">${Object.entries(ROLES).map(r=>`<option value="${r[0]}">${r[1]}</option>`).join("")}</select></div></div>
+  <div class="row"><button class="b" onclick="addUser()">Create user</button></div></div>
+  <div class="card"><h2>Users (${users.length})</h2><div class="tw"><table><tr><th>Name</th><th>Email</th><th>Role</th><th></th></tr>
+  ${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>
+  <select onchange="setRole('${u.id}',this.value)">${Object.entries(ROLES).map(r=>`<option value="${r[0]}" ${u.role===r[0]?"selected":""}>${r[1]}</option>`).join("")}</select></td>
+  <td>${u.id===me.uid?"":`<button class="b d" onclick="revoke('${u.id}')">Remove access</button>`}</td></tr>`).join("")}</table></div></div>`;
+}
+window.addUser=async()=>{
+  const name=$("#un").value.trim(),email=$("#ue").value.trim(),pw=$("#up").value,role=$("#ur").value;
+  if(!name||!email||pw.length<6)return say("Enter name, email and a password of 6+ characters.",true);
+  let sec;
+  try{
+    sec=firebase.initializeApp(CFG,"sec"+Date.now());
+    const c=await sec.auth().createUserWithEmailAndPassword(email,pw);
+    await sec.auth().signOut();
+    await db.doc("users/"+c.user.uid).set({name,email,role});
+    await loadAll();say("User created. Share the email and temporary password with them.");
+  }catch(e){err(e)}finally{if(sec)sec.delete()}
+};
+window.setRole=async(id,role)=>{try{await db.doc("users/"+id).update({role});await loadAll();say("Role updated.")}catch(e){err(e)}};
+window.revoke=async id=>{if(!confirm("Remove this user's access?"))return;try{await db.doc("users/"+id).delete();await loadAll();say("Access removed.")}catch(e){err(e)}};
+</script></body></html>
