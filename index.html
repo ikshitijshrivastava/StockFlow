@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>StockBill – Phase 1</title>
+<title>StockBill – Phase 3 (multi-organisation)</title>
 <style>
 :root{--bg:#f3f5f2;--card:#fff;--ink:#1d2a24;--mut:#66756d;--line:#d9e0db;--pri:#14594a;--pri2:#0e4337;--bad:#b3261e;--ok:#1b7a3d}
 *{box-sizing:border-box}
@@ -26,6 +26,19 @@ button.d{background:#fff;color:var(--bad);border:1px solid var(--bad)}
 th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{color:var(--mut);font-weight:600}
 .msg{padding:9px 12px;border-radius:8px;margin-bottom:10px;background:#e8f3ec;color:var(--ok)}.msg.e{background:#fbe9e7;color:var(--bad)}
 .login{max-width:380px;margin:8vh auto}.mut{color:var(--mut);font-size:13px}.hide{display:none}
+h3{margin:14px 0 6px;font-size:15px}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;background:#eef2ef;color:var(--mut)}
+.badge.ok{background:#e8f3ec;color:var(--ok)}.badge.w{background:#fff4e0;color:#8a5a00}.badge.x{background:#fbe9e7;color:var(--bad)}
+.short{color:var(--bad);font-weight:600}
+.sheet .top{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:2px solid var(--ink);padding-bottom:8px;margin-bottom:10px}
+.sheet .two{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px}
+table.pr th,table.pr td{border:1px solid var(--ink)}
+.sign{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:56px;text-align:center;font-size:13px}
+.sign div{border-top:1px solid var(--ink);padding-top:4px}
+@media print{header,nav,.noprint,.msg{display:none!important}body{background:#fff}main{max-width:none;padding:0}.card{border:0;padding:0;margin:0}}
+.mods{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:6px}
+label.chk{display:flex;align-items:center;gap:7px;font-size:14px;color:var(--ink);margin:0}
+input[type=checkbox]{width:auto}
 </style></head><body>
 <div id="app"></div>
 
@@ -39,64 +52,138 @@ const CFG={apiKey:"AIzaSyBHPncMFGpHJx85bhcKhH94hVexld40A-g",authDomain:"stockflo
 
 firebase.initializeApp(CFG);
 const auth=firebase.auth(),db=firebase.firestore();
-const ROLES={admin:"Admin",manager:"Warehouse manager",keeper:"Warehouse keeper",billdesk:"Bill desk"};
-let me=null,tab="items",setupMode=false,items=[],whs=[],users=[],stock=[],note="",editing=null;
+const ROLES={admin:"Admin",manager:"Warehouse manager",keeper:"Warehouse keeper",billdesk:"Bill desk",super:"Platform owner"};
+const ORG_ROLES=["admin","manager","keeper","billdesk"];
+
+/* ---------- MODULE CATALOGUE (what an organisation can buy) ----------
+   requires = modules that must also be on. soon = no screens yet.
+   Firestore rules enforce the module flags, so switching one off really blocks it. */
+const MODS={
+  warehouse:{label:"Warehouse",desc:"Warehouse master",requires:[],dflt:true},
+  inventory:{label:"Inventory",desc:"Items, Excel upload, product compositions, stock ledger",requires:["warehouse"],dflt:true},
+  sales:{label:"Sales (challans)",desc:"Delivery challans, returns, manager verification",requires:["inventory"]},
+  billing:{label:"Billing",desc:"Challan-to-bill, GST, payments",requires:["inventory"],soon:true},
+  purchase:{label:"Purchase",desc:"Purchase orders and receipts",requires:["inventory"],soon:true},
+  reports:{label:"Reports & dashboards",desc:"Analytics",requires:[],soon:true}
+};
+const reqAll=(k,s=new Set())=>{if(s.has(k))return s;s.add(k);MODS[k].requires.forEach(r=>reqAll(r,s));return s};            // k + everything it needs
+const depsOf=(k,s=new Set())=>{if(s.has(k))return s;s.add(k);Object.keys(MODS).filter(x=>MODS[x].requires.includes(k)).forEach(x=>depsOf(x,s));return s}; // k + everything needing it
+const fullMods=picked=>{const on=new Set();picked.forEach(k=>reqAll(k).forEach(x=>on.add(x)));const m={};Object.keys(MODS).forEach(k=>m[k]=on.has(k));return m};
+
+let me=null,tab="items",busy=false,items=[],whs=[],users=[],stock=[],note="",editing=null,products=[],challans=[],company={};
+let orgId=null,org=null,orgsList=[];
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const O=n=>db.collection("orgs/"+orgId+"/"+n);      // this organisation's collection
+const D=p=>db.doc("orgs/"+orgId+"/"+p);             // this organisation's document
+const has=m=>!!(org&&org.modules&&org.modules[m]);
+const orgOK=()=>org&&org.active!==false&&(!org.validUntil||Date.now()<=org.validUntil);
 const canEdit=()=>me&&(me.role==="admin"||me.role==="manager");
 const isAdmin=()=>me&&me.role==="admin";
 function say(t,e){note=`<div class="msg ${e?"e":""}">${esc(t)}</div>`;draw()}
 function err(e){say(e.message||String(e),true)}
+const resetData=()=>{items=[];whs=[];stock=[];products=[];challans=[];company={};users=[]};
 
 auth.onAuthStateChanged(async u=>{
-  if(setupMode)return;
-  if(!u){me=null;return loginView()}
-  try{
-    const d=await db.doc("users/"+u.uid).get();
-    if(!d.exists){me=null;return loginView("This account has no role yet. Ask your admin to add you.",true)}
-    me={uid:u.uid,...d.data()};await loadAll();draw();
-  }catch(e){loginView(e.message,true)}
+  if(busy)return;
+  if(!u){me=null;orgId=null;org=null;return loginView()}
+  try{await boot(u)}catch(e){loginView(e.message,true)}
 });
+
+async function boot(u){
+  resetData();
+  const sp=await db.doc("platform/"+u.uid).get();
+  if(sp.exists){me={uid:u.uid,...sp.data(),super:true,role:"super"};orgId=null;org=null;tab="orgs";await loadOrgs();return draw()}
+  const uo=await db.doc("userOrg/"+u.uid).get();
+  if(!uo.exists){
+    let legacy=null,claimed=true;
+    try{const l=await db.doc("users/"+u.uid).get();legacy=l.exists?l.data():null;claimed=(await db.doc("meta/platform").get()).exists}catch(e){}
+    me=null;
+    if(legacy&&legacy.role==="admin"&&!claimed)return claimView(legacy);
+    return loginView("This account is not linked to an organisation. Ask your vendor or admin.",true);
+  }
+  orgId=uo.data().orgId;
+  const [od,ud]=await Promise.all([db.doc("orgs/"+orgId).get(),D("users/"+u.uid).get()]);
+  if(!od.exists||!ud.exists){me=null;return loginView("Your access has been removed.",true)}
+  org={id:orgId,...od.data()};
+  if(!orgOK()){me=null;return loginView("This organisation's subscription is inactive or expired. Please contact your vendor.",true)}
+  me={uid:u.uid,...ud.data(),super:false};
+  tab="";await loadAll();draw();
+}
 
 async function loginView(m,bad){
   let first=false;
-  try{first=!(await db.doc("meta/setup").get()).exists}catch(e){}
+  try{first=!(await db.doc("meta/platform").get()).exists&&!(await db.doc("meta/setup").get()).exists}catch(e){}
   $("#app").innerHTML=`<div class="login card"><h2>StockBill</h2>
   ${m?`<div class="msg ${bad?"e":""}">${esc(m)}</div>`:""}
   ${first?`<div class="field"><label>Your name (first-time setup only)</label><input id="nm"></div>`:""}
   <label>Email</label><input id="em" type="email"><label style="margin-top:8px">Password</label><input id="pw" type="password">
   <div class="row"><button class="b" onclick="login()">Log in</button>
-  ${first?`<button class="b s" onclick="setup()">Create first admin</button>`:""}
+  ${first?`<button class="b s" onclick="setup()">Create platform owner</button>`:""}
   ${auth.currentUser?`<button class="b s" onclick="auth.signOut()">Log out</button>`:""}</div>
-  ${first?`<p class="mut">No admin exists yet. Use “Create first admin” once; after that, only admins can add users.</p>`:""}</div>`;
+  ${first?`<p class="mut">Fresh install: this first account becomes the platform owner who creates organisations and switches modules on or off.</p>`:""}</div>`;
 }
+function claimView(l){
+  $("#app").innerHTML=`<div class="login card"><h2>Upgrade to multi-organisation</h2>
+  <p>You are the original admin of the single-company version. Make this account the <b>platform owner</b> to create organisations (customers) and control which modules each one has.</p>
+  <div class="row"><button class="b" onclick="claim()">Make me platform owner</button><button class="b s" onclick="auth.signOut()">Log out</button></div></div>`;
+}
+window.claim=async()=>{
+  const u=auth.currentUser;
+  try{
+    const b=db.batch();
+    b.set(db.doc("platform/"+u.uid),{name:u.displayName||u.email,email:u.email});
+    b.set(db.doc("meta/platform"),{by:u.uid,at:Date.now()});
+    await b.commit();await boot(u);
+  }catch(e){loginView(e.message,true)}
+};
 window.login=()=>auth.signInWithEmailAndPassword($("#em").value.trim(),$("#pw").value).catch(e=>loginView(e.message,true));
 window.setup=async()=>{
-  const em=$("#em").value.trim(),pw=$("#pw").value,nm=$("#nm").value.trim()||"Admin";
+  const em=$("#em").value.trim(),pw=$("#pw").value,nm=$("#nm").value.trim()||"Owner";
   try{
-    setupMode=true;
+    busy=true;
     const c=await auth.createUserWithEmailAndPassword(em,pw);
     const b=db.batch();
-    b.set(db.doc("users/"+c.user.uid),{name:nm,email:em,role:"admin"});
+    b.set(db.doc("platform/"+c.user.uid),{name:nm,email:em});
     b.set(db.doc("meta/setup"),{by:c.user.uid,at:Date.now()});
+    b.set(db.doc("meta/platform"),{by:c.user.uid,at:Date.now()});
     await b.commit();
-    setupMode=false;me={uid:c.user.uid,name:nm,email:em,role:"admin"};await loadAll();draw();
-  }catch(e){setupMode=false;loginView(e.message,true)}
+    busy=false;await boot(c.user);
+  }catch(e){busy=false;loginView(e.message,true)}
 };
 
 async function loadAll(){
-  const [i,w,st]=await Promise.all([db.collection("items").orderBy("code").get(),db.collection("warehouses").orderBy("name").get(),db.collection("stock").get()]);
-  stock=st.docs.map(d=>d.data()).sort((a,b)=>b.at-a.at);
-  items=i.docs.map(d=>({id:d.id,...d.data()}));whs=w.docs.map(d=>({id:d.id,...d.data()}));
-  if(isAdmin()){const u=await db.collection("users").get();users=u.docs.map(d=>({id:d.id,...d.data()}))}
+  const od=await db.doc("orgs/"+orgId).get();org={id:orgId,...od.data()};
+  resetData();const P=[];
+  if(has("inventory"))P.push((async()=>{
+    const [i,st,pr]=await Promise.all([O("items").orderBy("code").get(),O("stock").get(),O("products").orderBy("code").get()]);
+    items=i.docs.map(d=>({id:d.id,...d.data()}));stock=st.docs.map(d=>d.data()).sort((a,b)=>b.at-a.at);products=pr.docs.map(d=>({id:d.id,...d.data()}));
+  })());
+  if(has("warehouse"))P.push((async()=>{const w=await O("warehouses").orderBy("name").get();whs=w.docs.map(d=>({id:d.id,...d.data()}))})());
+  if(has("sales"))P.push((async()=>{const c=await O("challans").orderBy("at","desc").limit(300).get();challans=c.docs.map(d=>({id:d.id,...d.data()}))})());
+  P.push((async()=>{const co=await D("settings/company").get();company=co.exists?co.data():{}})());
+  if(isAdmin())P.push((async()=>{const u=await O("users").get();users=u.docs.map(d=>({id:d.id,...d.data()}))})());
+  await Promise.all(P);
 }
 
+function tabsFor(){
+  if(!orgId)return [{k:"orgs",l:"Organisations",on:true}];
+  const t=[["items","Items","inventory"],["whs","Warehouses","warehouse"],["stock","Stock","inventory"],["products","Products","inventory"],["challans","Challans","sales"]]
+    .map(([k,l,m])=>({k,l,on:has(m)}));
+  if(isAdmin())t.push({k:"users",l:"Users",on:true},{k:"company",l:"Company & plan",on:true});
+  return t;
+}
+window.goTab=k=>{tab=k;note="";editing=null;pd=null;cd=null;calc=null;viewing=null;draw()};
 function draw(){
-  const tabs=[["items","Items"],["whs","Warehouses"],["stock","Stock"]];if(isAdmin())tabs.push(["users","Users"]);
-  $("#app").innerHTML=`<header><b>StockBill</b><small>${esc(me.name)} · ${ROLES[me.role]}</small>
+  const ts=tabsFor();
+  if(!ts.some(t=>t.k===tab&&t.on))tab=(ts.find(t=>t.on)||{k:""}).k;
+  const views={items:itemsView,whs:whView,stock:stockView,products:productsView,challans:challansView,users:usersView,company:companyView,orgs:orgsView};
+  $("#app").innerHTML=`<header><b>StockBill</b><small>${org?esc(org.name)+" · ":""}${esc(me.name)} · ${ROLES[me.role]}</small>
+  ${me.super&&orgId?`<button class="b s" onclick="leaveOrg()">← Platform</button>`:""}
   <button class="b s" onclick="auth.signOut()">Log out</button></header>
-  <nav>${tabs.map(t=>`<button class="${tab===t[0]?"on":""}" onclick="tab='${t[0]}';note='';editing=null;draw()">${t[1]}</button>`).join("")}</nav>
-  <main>${note}${tab==="items"?itemsView():tab==="whs"?whView():tab==="stock"?stockView():usersView()}</main>`;
+  <nav>${ts.map(t=>t.on?`<button class="${tab===t.k?"on":""}" onclick="goTab('${t.k}')">${t.l}</button>`
+    :`<button style="opacity:.55" onclick="say('${t.l} is not part of your plan. Contact your vendor to enable it.',true)">🔒 ${t.l}</button>`).join("")}</nav>
+  <main>${note}${tab&&views[tab]?views[tab]():`<div class="card">No modules are enabled for this organisation yet. Please contact your vendor.</div>`}</main>`;
 }
 
 /* ---------- ITEMS ---------- */
@@ -126,9 +213,9 @@ window.saveItem=async()=>{
   const code=($("#ic").value||"").trim(),name=$("#in").value.trim();
   if(!code||!name)return say("Item code and name are required.",true);
   const d={code,name,unit:$("#iu").value.trim()||"pcs",hsn:$("#ih").value.trim(),gst:Number($("#ig").value)||0,rate:Number($("#ir").value)||0};
-  try{await db.doc("items/"+iid(code)).set(d,{merge:true});editing=null;await loadAll();say("Item saved.")}catch(e){err(e)}
+  try{await D("items/"+iid(code)).set(d,{merge:true});editing=null;await loadAll();say("Item saved.")}catch(e){err(e)}
 };
-window.delItem=async id=>{if(!confirm("Delete this item?"))return;try{await db.doc("items/"+id).delete();await loadAll();say("Item deleted.")}catch(e){err(e)}};
+window.delItem=async id=>{if(!confirm("Delete this item?"))return;try{await D("items/"+id).delete();await loadAll();say("Item deleted.")}catch(e){err(e)}};
 window.tpl=()=>{
   const ws=XLSX.utils.aoa_to_sheet([["Code","Name","Unit","HSN","GST%","Rate"],["ITM001","Sample item","pcs","1905",18,100]]);
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Items");XLSX.writeFile(wb,"items_template.xlsx");
@@ -145,7 +232,7 @@ window.upl=async()=>{
       ok.push({code,name,unit:String(r.Unit||"pcs"),hsn:String(r.HSN||""),gst:Number(r["GST%"])||0,rate:Number(r.Rate)||0});
     });
     for(let i=0;i<ok.length;i+=400){
-      const b=db.batch();ok.slice(i,i+400).forEach(d=>b.set(db.doc("items/"+iid(d.code)),d,{merge:true}));await b.commit();
+      const b=db.batch();ok.slice(i,i+400).forEach(d=>b.set(D("items/"+iid(d.code)),d,{merge:true}));await b.commit();
     }
     await loadAll();say(`${ok.length} items saved.${bad.length?` Skipped rows (missing code or name): ${bad.join(", ")}.`:""}`,bad.length>0&&!ok.length);
   }catch(e){err(e)}
@@ -163,9 +250,9 @@ function whView(){
 }
 window.addWh=async()=>{
   const name=$("#wn").value.trim();if(!name)return say("Warehouse name is required.",true);
-  try{await db.collection("warehouses").add({name,location:$("#wl").value.trim(),incharge:$("#wi").value.trim()});await loadAll();say("Warehouse saved.")}catch(e){err(e)}
+  try{await O("warehouses").add({name,location:$("#wl").value.trim(),incharge:$("#wi").value.trim()});await loadAll();say("Warehouse saved.")}catch(e){err(e)}
 };
-window.delWh=async id=>{if(!confirm("Delete this warehouse?"))return;try{await db.doc("warehouses/"+id).delete();await loadAll();say("Warehouse deleted.")}catch(e){err(e)}};
+window.delWh=async id=>{if(!confirm("Delete this warehouse?"))return;try{await D("warehouses/"+id).delete();await loadAll();say("Warehouse deleted.")}catch(e){err(e)}};
 
 /* ---------- STOCK LEDGER ---------- */
 const MT={in:"Stock in",out:"Stock out",return:"Returned",damage:"Damaged"};
@@ -193,19 +280,19 @@ window.addMove=async()=>{
   if(!(qty>0))return say("Enter a quantity above zero.",true);
   const have=avail(balances()[wh+"|"+item]);
   if((type==="out"||type==="damage")&&qty>have)return say(`Only ${have} available in this warehouse.`,true);
-  try{await db.collection("stock").add({wh,item,type,qty,ref:$("#sr").value.trim(),by:me.name,at:Date.now()});await loadAll();say("Movement saved.")}catch(e){err(e)}
+  try{await O("stock").add({wh,item,type,qty,ref:$("#sr").value.trim(),by:me.name,at:Date.now()});await loadAll();say("Movement saved.")}catch(e){err(e)}
 };
 
-/* ---------- USERS (admin) ---------- */
+/* ---------- USERS (organisation admin) ---------- */
 function usersView(){
   return `<div class="card"><h2>Add user</h2><div class="g">
   <div><label>Name</label><input id="un"></div><div><label>Email</label><input id="ue" type="email"></div>
   <div><label>Temporary password (6+ chars)</label><input id="up"></div>
-  <div><label>Role</label><select id="ur">${Object.entries(ROLES).map(r=>`<option value="${r[0]}">${r[1]}</option>`).join("")}</select></div></div>
+  <div><label>Role</label><select id="ur">${ORG_ROLES.map(r=>`<option value="${r}">${ROLES[r]}</option>`).join("")}</select></div></div>
   <div class="row"><button class="b" onclick="addUser()">Create user</button></div></div>
   <div class="card"><h2>Users (${users.length})</h2><div class="tw"><table><tr><th>Name</th><th>Email</th><th>Role</th><th></th></tr>
   ${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>
-  <select onchange="setRole('${u.id}',this.value)">${Object.entries(ROLES).map(r=>`<option value="${r[0]}" ${u.role===r[0]?"selected":""}>${r[1]}</option>`).join("")}</select></td>
+  <select ${u.id===me.uid?"disabled":""} onchange="setRole('${u.id}',this.value)">${ORG_ROLES.map(r=>`<option value="${r}" ${u.role===r?"selected":""}>${ROLES[r]}</option>`).join("")}</select></td>
   <td>${u.id===me.uid?"":`<button class="b d" onclick="revoke('${u.id}')">Remove access</button>`}</td></tr>`).join("")}</table></div></div>`;
 }
 window.addUser=async()=>{
@@ -216,10 +303,319 @@ window.addUser=async()=>{
     sec=firebase.initializeApp(CFG,"sec"+Date.now());
     const c=await sec.auth().createUserWithEmailAndPassword(email,pw);
     await sec.auth().signOut();
-    await db.doc("users/"+c.user.uid).set({name,email,role});
+    const b=db.batch();
+    b.set(D("users/"+c.user.uid),{name,email,role});
+    b.set(db.doc("userOrg/"+c.user.uid),{orgId});
+    await b.commit();
     await loadAll();say("User created. Share the email and temporary password with them.");
   }catch(e){err(e)}finally{if(sec)sec.delete()}
 };
-window.setRole=async(id,role)=>{try{await db.doc("users/"+id).update({role});await loadAll();say("Role updated.")}catch(e){err(e)}};
-window.revoke=async id=>{if(!confirm("Remove this user's access?"))return;try{await db.doc("users/"+id).delete();await loadAll();say("Access removed.")}catch(e){err(e)}};
+window.setRole=async(id,role)=>{try{await D("users/"+id).update({role});await loadAll();say("Role updated.")}catch(e){err(e)}};
+window.revoke=async id=>{
+  if(!confirm("Remove this user's access?"))return;
+  try{const b=db.batch();b.delete(D("users/"+id));b.delete(db.doc("userOrg/"+id));await b.commit();await loadAll();say("Access removed.")}catch(e){err(e)}
+};
+
+/* ================= PHASE 3 ================= */
+const rnd=n=>Math.round(n*1000)/1000;
+const today=()=>new Date().toISOString().slice(0,10);
+const dfmt=s=>{const p=String(s||"").split("-");return p.length===3?p[2]+"/"+p[1]+"/"+p[0]:(s||"")};
+const opts=(a,f,sel)=>a.map(x=>`<option value="${esc(x.id)}" ${x.id===sel?"selected":""}>${esc(f(x))}</option>`).join("");
+const gv=id=>{const e=$("#"+id);return e?e.value:""};
+// components of a challan line for quantity q (products explode into their items)
+const comps=(l,q)=>l.kind==="product"?(l.comp||[]).map(c=>[c.item,rnd(c.qty*q)]):[[l.ref,q]];
+function needOf(lines,key){key=key||"out";const m={};lines.forEach(l=>comps(l,l[key]).forEach(([i,n])=>m[i]=rnd((m[i]||0)+n)));return m}
+const pend=l=>rnd(l.out-(l.billed||0)-(l.returned||0));
+const canCreateCh=()=>me&&["admin","manager","keeper"].includes(me.role);
+const canBill=()=>me&&["admin","manager","billdesk"].includes(me.role);
+const compText=ls=>(ls||[]).map(c=>`${c.qty} × ${iName(c.item)}`).join(", ");
+
+/* ---------- PRODUCTS (compositions) ---------- */
+let pd=null,calc=null;
+const pdNew=()=>({code:"",name:"",unit:"set",lines:[]});
+function pdSync(){if(!pd)return;pd.code=gv("pc");pd.name=gv("pn");pd.unit=gv("pu")}
+function productsView(){
+  let form="";
+  if(canEdit()){
+    pd=pd||pdNew();
+    form=`<div class="card"><h2>${pd.id?"Edit product":"New product"}</h2><div class="g">
+    <div><label>Product code</label><input id="pc" value="${esc(pd.code)}" ${pd.id?"disabled":""}></div>
+    <div><label>Product name</label><input id="pn" value="${esc(pd.name)}"></div>
+    <div><label>Unit</label><input id="pu" value="${esc(pd.unit)}"></div></div>
+    <h3>Composition (items in one product)</h3>
+    <div class="g"><div><label>Item</label><select id="pi">${opts(items,x=>x.code+" – "+x.name)}</select></div>
+    <div><label>Qty per product</label><input id="pq" type="number" min="0" step="any"></div>
+    <div style="align-self:end"><button class="b s" onclick="pdAdd()">Add to composition</button></div></div>
+    <div class="tw"><table><tr><th>Item</th><th>Qty</th><th></th></tr>
+    ${pd.lines.map((l,i)=>`<tr><td>${esc(iName(l.item))}</td><td>${l.qty}</td><td><button class="b d" onclick="pdDel(${i})">Remove</button></td></tr>`).join("")||`<tr><td colspan="3">No items yet.</td></tr>`}</table></div>
+    <div class="row"><button class="b" onclick="saveProduct()">Save product</button>${pd.id?`<button class="b s" onclick="pd=null;draw()">Cancel</button>`:""}</div></div>`;
+  }
+  const calcCard=products.length&&whs.length?`<div class="card"><h2>Check requirement (product → items)</h2><div class="g">
+  <div><label>Warehouse</label><select id="kw">${opts(whs,w=>w.name,calc&&calc.wh)}</select></div>
+  <div><label>Product</label><select id="kp">${opts(products,p=>p.code+" – "+p.name,calc&&calc.p)}</select></div>
+  <div><label>Quantity</label><input id="kq" type="number" min="0" step="any" value="${calc?calc.q:1}"></div></div>
+  <div class="row"><button class="b s" onclick="runCalc()">Check</button></div>${calc?calcOut():""}</div>`:"";
+  return form+`<div class="card"><h2>Products (${products.length})</h2><div class="tw"><table><tr><th>Code</th><th>Name</th><th>Unit</th><th>Composition</th>${canEdit()?"<th></th>":""}</tr>
+  ${products.map(p=>`<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td>${esc(p.unit)}</td><td style="white-space:normal">${esc(compText(p.lines))}</td>
+  ${canEdit()?`<td><button class="b s" onclick="editProduct('${esc(p.id)}')">Edit</button> <button class="b d" onclick="delProduct('${esc(p.id)}')">Delete</button></td>`:""}</tr>`).join("")||`<tr><td colspan="5">No products yet. Define one above (items needed to make one product).</td></tr>`}
+  </table></div></div>`+calcCard;
+}
+window.pdAdd=()=>{
+  pdSync();const item=gv("pi"),qty=Number(gv("pq"));
+  if(!item)return say("Add items first (Items tab).",true);
+  if(!(qty>0))return say("Enter a quantity above zero.",true);
+  const ex=pd.lines.find(l=>l.item===item);if(ex)ex.qty=qty;else pd.lines.push({item,qty});draw();
+};
+window.pdDel=i=>{pdSync();pd.lines.splice(i,1);draw()};
+window.editProduct=id=>{const p=products.find(x=>x.id===id);pd={id,code:p.code,name:p.name,unit:p.unit||"set",lines:p.lines.map(l=>({...l}))};draw();window.scrollTo(0,0)};
+window.saveProduct=async()=>{
+  pdSync();const code=pd.code.trim(),name=pd.name.trim();
+  if(!code||!name)return say("Product code and name are required.",true);
+  if(!pd.lines.length)return say("Add at least one item to the composition.",true);
+  try{
+    await D("products/"+iid(code)).set({code,name,unit:pd.unit.trim()||"set",lines:pd.lines,by:me.name,at:Date.now()});
+    pd=null;await loadAll();say("Product saved. Existing challans keep the composition they were created with.");
+  }catch(e){err(e)}
+};
+window.delProduct=async id=>{if(!confirm("Delete this product? Existing challans are not affected."))return;try{await D("products/"+id).delete();await loadAll();say("Product deleted.")}catch(e){err(e)}};
+window.runCalc=()=>{calc={wh:gv("kw"),p:gv("kp"),q:Number(gv("kq"))||0};draw()};
+function calcOut(){
+  const p=products.find(x=>x.id===calc.p);if(!p||!calc.wh)return"";
+  const b=balances();let can=Infinity;
+  const rows=p.lines.map(c=>{const have=avail(b[calc.wh+"|"+c.item]),nd=rnd(c.qty*calc.q),sh=Math.max(0,rnd(nd-have));can=Math.min(can,Math.floor(have/c.qty));
+    return`<tr><td>${esc(iName(c.item))}</td><td>${c.qty}</td><td>${nd}</td><td>${have}</td><td class="${sh?"short":""}">${sh||"–"}</td></tr>`}).join("");
+  return`<p style="margin:10px 0 4px"><b>${esc(wName(calc.wh))}</b> can make <b>${can===Infinity?0:can}</b> × ${esc(p.name)} from current stock.</p>
+  <div class="tw"><table><tr><th>Item</th><th>Per product</th><th>Needed</th><th>Available</th><th>Short</th></tr>${rows}</table></div>`;
+}
+
+/* ---------- CHALLANS ---------- */
+let cd=null,cf={q:"",st:""},viewing=null;
+const ST={dispatched:["Awaiting verification","w"],verified:["Verified","ok"],cancelled:["Cancelled","x"]};
+const badge=s=>`<span class="badge ${ST[s][1]}">${ST[s][0]}</span>`;
+const cdNew=()=>({wh:(whs[0]||{}).id||"",date:today(),party:"",addr:"",gstin:"",phone:"",vehicle:"",note:"",kind:"item",lines:[]});
+function cdSync(){if(!cd)return;cd.wh=gv("cw");cd.date=gv("cdt");cd.party=gv("cp");cd.addr=gv("ca");cd.gstin=gv("cg");cd.phone=gv("cph");cd.vehicle=gv("cv");cd.note=gv("cn");cd.kind=gv("ck")||cd.kind}
+function challansView(){
+  if(viewing)return challanDetail();
+  let form="";
+  if(canCreateCh()){
+    if(!cd)form=`<div class="card"><div class="row" style="margin:0"><button class="b" onclick="cd=cdNew();draw()">+ New challan</button></div></div>`;
+    else{
+      const nd=needOf(cd.lines),b=balances();
+      const short=Object.entries(nd).map(([i,n])=>[i,n,avail(b[cd.wh+"|"+i])]);
+      form=`<div class="card"><h2>New delivery challan</h2><div class="g">
+      <div><label>Dispatch from warehouse</label><select id="cw">${opts(whs,w=>w.name,cd.wh)}</select></div>
+      <div><label>Date</label><input id="cdt" type="date" value="${esc(cd.date)}"></div>
+      <div><label>Party / customer</label><input id="cp" list="pl" value="${esc(cd.party)}"><datalist id="pl">${[...new Set(challans.map(c=>c.party))].map(p=>`<option value="${esc(p)}">`).join("")}</datalist></div>
+      <div><label>Party GSTIN</label><input id="cg" value="${esc(cd.gstin)}"></div>
+      <div><label>Phone</label><input id="cph" value="${esc(cd.phone)}"></div>
+      <div><label>Vehicle / transporter</label><input id="cv" value="${esc(cd.vehicle)}"></div></div>
+      <div style="margin-top:8px"><label>Delivery address</label><input id="ca" value="${esc(cd.addr)}"></div>
+      <div style="margin-top:8px"><label>Note</label><input id="cn" value="${esc(cd.note)}"></div>
+      <h3>Lines</h3><div class="g">
+      <div><label>Type</label><select id="ck" onchange="cdSync();draw()"><option value="item" ${cd.kind==="item"?"selected":""}>Item</option><option value="product" ${cd.kind==="product"?"selected":""}>Product (composition)</option></select></div>
+      <div><label>${cd.kind==="product"?"Product":"Item"}</label><select id="cr">${cd.kind==="product"?opts(products,p=>p.code+" – "+p.name):opts(items,x=>x.code+" – "+x.name)}</select></div>
+      <div><label>Quantity</label><input id="cq" type="number" min="0" step="any"></div>
+      <div style="align-self:end"><button class="b s" onclick="cdAdd()">Add line</button></div></div>
+      <div class="tw"><table><tr><th>Description</th><th>Unit</th><th>Qty out</th><th></th></tr>
+      ${cd.lines.map((l,i)=>`<tr><td>${esc(l.code+" – "+l.name)}${l.kind==="product"?`<div class="mut" style="white-space:normal">${esc(compText(l.comp))}</div>`:""}</td><td>${esc(l.unit)}</td><td>${l.out}</td><td><button class="b d" onclick="cdDel(${i})">Remove</button></td></tr>`).join("")||`<tr><td colspan="4">No lines yet.</td></tr>`}</table></div>
+      ${short.length?`<h3>Stock check at ${esc(wName(cd.wh))}</h3><div class="tw"><table><tr><th>Item</th><th>Needed</th><th>Available</th><th></th></tr>
+      ${short.map(([i,n,h])=>`<tr><td>${esc(iName(i))}</td><td>${n}</td><td>${h}</td><td class="${n>h?"short":""}">${n>h?"Short by "+rnd(n-h):"OK"}</td></tr>`).join("")}</table></div>`:""}
+      <div class="row"><button class="b" onclick="createChallan()">Create challan &amp; deduct stock</button><button class="b s" onclick="cd=null;draw()">Discard</button></div></div>`;
+    }
+  }
+  const q=cf.q.toLowerCase();
+  const list=challans.filter(c=>(!cf.st||c.status===cf.st)&&(!q||(c.no+" "+c.party).toLowerCase().includes(q)));
+  return form+`<div class="card"><h2>Challans (${list.length})</h2>
+  <div class="g" style="margin-bottom:8px"><div><label>Search number / party</label><input value="${esc(cf.q)}" onchange="cf.q=this.value;draw()"></div>
+  <div><label>Status</label><select onchange="cf.st=this.value;draw()"><option value="">All</option>${Object.entries(ST).map(([k,v])=>`<option value="${k}" ${cf.st===k?"selected":""}>${v[0]}</option>`).join("")}</select></div></div>
+  <div class="tw"><table><tr><th>No.</th><th>Date</th><th>Party</th><th>Warehouse</th><th>Status</th><th>Out</th><th>Billed</th><th>Returned</th><th>Pending</th><th></th></tr>
+  ${list.map(c=>{const s=k=>rnd(c.lines.reduce((a,l)=>a+(l[k]||0),0));return`<tr><td><b>${esc(c.no)}</b></td><td>${dfmt(c.date)}</td><td>${esc(c.party)}</td><td>${esc(c.whName||wName(c.wh))}</td><td>${badge(c.status)}</td><td>${s("out")}</td><td>${s("billed")}</td><td>${s("returned")}</td><td>${c.status==="cancelled"?"–":rnd(c.lines.reduce((a,l)=>a+pend(l),0))}</td><td><button class="b s" onclick="viewing='${esc(c.id)}';draw();window.scrollTo(0,0)">Open</button></td></tr>`}).join("")||`<tr><td colspan="10">No challans found.</td></tr>`}</table></div></div>`;
+}
+window.cdAdd=()=>{
+  cdSync();const kind=cd.kind,ref=gv("cr"),qty=Number(gv("cq"));
+  if(!ref)return say(kind==="product"?"Define a product first (Products tab).":"Add items first (Items tab).",true);
+  if(!(qty>0))return say("Enter a quantity above zero.",true);
+  const ex=cd.lines.find(l=>l.kind===kind&&l.ref===ref);
+  if(ex)ex.out=rnd(ex.out+qty);
+  else if(kind==="product"){const p=products.find(x=>x.id===ref);cd.lines.push({kind,ref,code:p.code,name:p.name,unit:p.unit||"set",out:qty,billed:0,returned:0,comp:p.lines.map(c=>({item:c.item,qty:c.qty}))})}
+  else{const i=items.find(x=>x.id===ref);cd.lines.push({kind,ref,code:i.code,name:i.name,unit:i.unit||"pcs",out:qty,billed:0,returned:0})}
+  draw();
+};
+window.cdDel=i=>{cdSync();cd.lines.splice(i,1);draw()};
+const stockDoc=(wh,item,type,qty,ref,cid)=>({wh,item,type,qty,ref,challan:cid,by:me.name,at:Date.now()});
+window.createChallan=async()=>{
+  cdSync();
+  if(!cd.wh)return say("Choose a warehouse.",true);
+  if(!cd.party.trim())return say("Enter the party name.",true);
+  if(!cd.lines.length)return say("Add at least one line.",true);
+  try{
+    await loadAll();
+    const nd=needOf(cd.lines),b=balances();
+    for(const [i,n] of Object.entries(nd)){const h=avail(b[cd.wh+"|"+i]);if(n>h)return say(`${iName(i)}: need ${n}, only ${h} available in ${wName(cd.wh)}.`,true)}
+    const ref=O("challans").doc(),cref=D("counters/main"),at=Date.now();
+    let no;
+    await db.runTransaction(async t=>{
+      const cs=await t.get(cref),n=(cs.exists&&cs.data().challan||0)+1;
+      no="CH-"+String(n).padStart(4,"0");
+      t.set(cref,{challan:n},{merge:true});
+      t.set(ref,{no,wh:cd.wh,whName:wName(cd.wh),date:cd.date||today(),party:cd.party.trim(),addr:cd.addr.trim(),gstin:cd.gstin.trim(),phone:cd.phone.trim(),vehicle:cd.vehicle.trim(),note:cd.note.trim(),
+        lines:cd.lines,status:"dispatched",createdBy:me.name,createdUid:me.uid,at,log:[{t:"Created and dispatched",by:me.name,at}]});
+      Object.entries(nd).forEach(([i,n2])=>t.set(O("stock").doc(),stockDoc(cd.wh,i,"out",n2,no,ref.id)));
+    });
+    cd=null;viewing=ref.id;await loadAll();say(`Challan ${no} created. Stock deducted.`);
+  }catch(e){err(e)}
+};
+
+function challanDetail(){
+  const c=challans.find(x=>x.id===viewing);if(!c){viewing=null;return challansView()}
+  const k=company,live=c.status!=="cancelled",anyPend=c.lines.some(l=>pend(l)>0);
+  const canVerify=canEdit()&&c.status==="dispatched"&&(isAdmin()||c.createdUid!==me.uid);
+  const showRet=live&&canCreateCh()&&anyPend,showBill=live&&canBill()&&anyPend;
+  const untouched=c.lines.every(l=>!l.billed&&!l.returned);
+  return `<div class="row noprint" style="margin:0 0 10px"><button class="b s" onclick="viewing=null;draw()">← All challans</button><button class="b" onclick="window.print()">Print challan</button>
+  ${canVerify?`<button class="b" onclick="verifyCh()">Verify (manager)</button>`:""}
+  ${canEdit()&&live&&untouched?`<button class="b d" onclick="cancelCh()">Cancel challan</button>`:""}</div>
+  <div class="card sheet">
+  <div class="top"><div><h2 style="margin:0">${esc(k.name||"Your company")}</h2><div class="mut">${esc(k.addr)}${k.phone?" · "+esc(k.phone):""}${k.gstin?"<br>GSTIN: "+esc(k.gstin):""}</div></div>
+  <div style="text-align:right"><h2 style="margin:0">DELIVERY CHALLAN</h2><b>${esc(c.no)}</b><br>Date: ${dfmt(c.date)}<br>${badge(c.status)}</div></div>
+  <div class="two"><div><label>Deliver to</label><b>${esc(c.party)}</b><br>${esc(c.addr)}${c.phone?"<br>Ph: "+esc(c.phone):""}${c.gstin?"<br>GSTIN: "+esc(c.gstin):""}</div>
+  <div><label>Dispatched from</label><b>${esc(c.whName||wName(c.wh))}</b>${c.vehicle?"<br>Vehicle: "+esc(c.vehicle):""}${c.note?"<br>Note: "+esc(c.note):""}</div></div>
+  <div class="tw"><table class="pr"><tr><th>#</th><th>Description</th><th>Unit</th><th>Out</th><th>Billed</th><th>Returned</th><th>Pending</th></tr>
+  ${c.lines.map((l,i)=>`<tr><td>${i+1}</td><td style="white-space:normal">${esc(l.code+" – "+l.name)}${l.kind==="product"?`<div class="mut">${esc(compText(l.comp))}</div>`:""}</td><td>${esc(l.unit)}</td><td>${l.out}</td><td>${l.billed||0}</td><td>${l.returned||0}</td><td>${live?pend(l):"–"}</td></tr>`).join("")}</table></div>
+  <div class="sign"><div>Prepared by<br>${esc(c.createdBy)}</div><div>Verified by (manager)<br>${esc(c.verifiedBy||"")}</div><div>Received by (party)</div></div></div>
+  ${showRet||showBill?`<div class="card noprint"><h2>Record quantities</h2><p class="mut">Returned goods go back into this warehouse's stock. Billed + returned cannot exceed the quantity out.</p>
+  <div class="tw"><table><tr><th>Item</th><th>Pending</th>${showRet?"<th>Return now</th>":""}${showBill?"<th>Billed now</th>":""}</tr>
+  ${c.lines.map((l,i)=>`<tr><td>${esc(l.name)}</td><td>${pend(l)}</td>${showRet?`<td><input id="rt${i}" type="number" min="0" step="any" style="width:90px"></td>`:""}${showBill?`<td><input id="bl${i}" type="number" min="0" step="any" style="width:90px"></td>`:""}</tr>`).join("")}</table></div>
+  <div class="row">${showRet?`<button class="b" onclick="recQty('return')">Record return</button>`:""}${showBill?`<button class="b s" onclick="recQty('billed')">Record billed</button>`:""}</div></div>`:""}
+  <div class="card noprint"><h2>Activity</h2><div class="tw"><table><tr><th>When</th><th>By</th><th>What</th></tr>
+  ${(c.log||[]).slice().reverse().map(e=>`<tr><td>${new Date(e.at).toLocaleString()}</td><td>${esc(e.by)}</td><td style="white-space:normal">${esc(e.t)}</td></tr>`).join("")}</table></div></div>`;
+}
+const logEv=(d,t)=>[...(d.log||[]),{t,by:me.name,at:Date.now()}];
+window.recQty=async mode=>{
+  const c=challans.find(x=>x.id===viewing),pre=mode==="return"?"rt":"bl";
+  const qs=c.lines.map((l,i)=>Number(gv(pre+i))||0);
+  if(!qs.some(q=>q>0))return say("Enter a quantity first.",true);
+  try{
+    await db.runTransaction(async t=>{
+      const ref=D("challans/"+c.id),s=await t.get(ref);if(!s.exists)throw new Error("Challan not found.");
+      const d=s.data();if(d.status==="cancelled")throw new Error("This challan is cancelled.");
+      const lines=d.lines.map(l=>({...l})),nd={},txt=[];
+      qs.forEach((q,i)=>{
+        if(q<=0)return;const l=lines[i],room=pend(l);
+        if(q>room)throw new Error(`${l.name}: only ${room} pending.`);
+        if(mode==="return"){l.returned=rnd((l.returned||0)+q);comps(l,q).forEach(([it,n])=>nd[it]=rnd((nd[it]||0)+n))}
+        else l.billed=rnd((l.billed||0)+q);
+        txt.push(`${l.name} ×${q}`);
+      });
+      t.update(ref,{lines,log:logEv(d,(mode==="return"?"Returned: ":"Billed: ")+txt.join(", "))});
+      Object.entries(nd).forEach(([it,n])=>t.set(O("stock").doc(),stockDoc(d.wh,it,"return",n,d.no+" return",c.id)));
+    });
+    await loadAll();say(mode==="return"?"Return recorded and stock updated.":"Billed quantity recorded.");
+  }catch(e){err(e)}
+};
+window.verifyCh=async()=>{
+  const id=viewing;
+  try{
+    await db.runTransaction(async t=>{
+      const ref=D("challans/"+id),s=await t.get(ref),d=s.data();
+      if(d.status!=="dispatched")throw new Error("Already "+d.status+".");
+      t.update(ref,{status:"verified",verifiedBy:me.name,verifiedAt:Date.now(),log:logEv(d,"Verified by manager")});
+    });
+    await loadAll();say("Challan verified.");
+  }catch(e){err(e)}
+};
+window.cancelCh=async()=>{
+  if(!confirm("Cancel this challan? The dispatched stock goes back into the warehouse."))return;
+  const id=viewing;
+  try{
+    await db.runTransaction(async t=>{
+      const ref=D("challans/"+id),s=await t.get(ref),d=s.data();
+      if(d.status==="cancelled")throw new Error("Already cancelled.");
+      if(d.lines.some(l=>l.billed||l.returned))throw new Error("Cannot cancel: quantities already billed or returned.");
+      t.update(ref,{status:"cancelled",log:logEv(d,"Cancelled; stock restored")});
+      Object.entries(needOf(d.lines)).forEach(([it,n])=>t.set(O("stock").doc(),stockDoc(d.wh,it,"return",n,d.no+" cancelled",id)));
+    });
+    await loadAll();say("Challan cancelled and stock restored.");
+  }catch(e){err(e)}
+};
+
+
+/* ---------- COMPANY & PLAN (organisation admin) ---------- */
+const ymd=ms=>{if(!ms)return"";const d=new Date(ms),p=n=>String(n).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())};
+function companyView(){
+  const k=company;
+  return `<div class="card"><h2>Company details</h2><p class="mut">Shown on printed challans (and bills later).</p><div class="g">
+  <div><label>Company name</label><input id="kn" value="${esc(k.name)}"></div><div><label>Phone</label><input id="kph" value="${esc(k.phone)}"></div>
+  <div><label>GSTIN</label><input id="kg" value="${esc(k.gstin)}"></div></div>
+  <div style="margin-top:8px"><label>Address</label><input id="ka" value="${esc(k.addr)}"></div>
+  <div class="row"><button class="b" onclick="saveCompany()">Save</button></div></div>
+  <div class="card"><h2>Your plan</h2><p class="mut">${org.validUntil?"Valid until "+ymd(org.validUntil):"No expiry date set"}. To add or remove modules, contact your vendor.</p>
+  <div class="tw"><table>${Object.entries(MODS).map(([k,m])=>`<tr><td>${m.label}${m.soon?" <span class='mut'>(coming soon)</span>":""}</td><td class="mut" style="white-space:normal">${m.desc}</td><td>${has(k)?"<span class='badge ok'>Active</span>":"<span class='badge'>Not in plan</span>"}</td></tr>`).join("")}</table></div></div>`;
+}
+window.saveCompany=async()=>{
+  try{await D("settings/company").set({name:gv("kn").trim(),phone:gv("kph").trim(),gstin:gv("kg").trim(),addr:gv("ka").trim()});await loadAll();say("Company details saved.")}catch(e){err(e)}
+};
+
+/* ---------- PLATFORM CONSOLE (platform owner only) ---------- */
+async function loadOrgs(){const s=await db.collection("orgs").get();orgsList=s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.name||"").localeCompare(b.name||""))}
+const modBox=(o,k)=>`<label class="chk"><input type="checkbox" ${o.modules&&o.modules[k]?"checked":""} onchange="toggleMod('${o.id}','${k}',this.checked)"> ${MODS[k].label}${MODS[k].soon?" <span class='mut'>(soon)</span>":""}</label>`;
+function orgsView(){
+  const mk=Object.entries(MODS);
+  return `<div class="card"><h2>New organisation (customer)</h2><div class="g">
+  <div><label>Organisation name</label><input id="on"></div><div><label>Admin name</label><input id="oan"></div>
+  <div><label>Admin email</label><input id="oae" type="email"></div><div><label>Temporary password (6+)</label><input id="oap"></div></div>
+  <h3>Modules purchased</h3><div class="mods">${mk.map(([k,m])=>`<label class="chk"><input type="checkbox" id="nm_${k}" ${m.dflt?"checked":""}> ${m.label}${m.soon?" <span class='mut'>(soon)</span>":""}</label>`).join("")}</div>
+  <p class="mut">Modules that need others switch those on automatically (e.g. Sales needs Inventory and Warehouse).</p>
+  <div class="row"><button class="b" onclick="createOrg()">Create organisation</button></div></div>
+  ${orgsList.map(o=>`<div class="card"><h2>${esc(o.name)} ${o.active===false?"<span class='badge x'>Suspended</span>":"<span class='badge ok'>Active</span>"}</h2>
+  <div class="mods">${Object.keys(MODS).map(k=>modBox(o,k)).join("")}</div>
+  <div class="g" style="margin-top:8px"><div><label>Valid until (blank = no expiry)</label><input type="date" value="${ymd(o.validUntil)}" onchange="setValid('${o.id}',this.value)"></div></div>
+  <div class="row"><button class="b" onclick="enterOrg('${o.id}')">Open</button><button class="b s" onclick="setAll('${o.id}',true)">Enable all</button><button class="b s" onclick="setAll('${o.id}',false)">Disable all</button>
+  <button class="b ${o.active===false?"":"d"}" onclick="setActive('${o.id}',${o.active===false})">${o.active===false?"Reactivate":"Suspend organisation"}</button></div></div>`).join("")||`<div class="card mut">No organisations yet.</div>`}
+  <div class="card"><h2>Import data from the old single-company version</h2><p class="mut">Copies items, warehouses, stock, products, challans, company details, counters and users into one organisation. Safe to re-run. Skip this if you are starting fresh.</p>
+  <div class="row"><select id="mg" style="max-width:260px">${opts(orgsList,o=>o.name)}</select><button class="b" onclick="migrate()">Import</button></div></div>`;
+}
+window.createOrg=async()=>{
+  const name=gv("on").trim(),an=gv("oan").trim(),ae=gv("oae").trim(),ap=gv("oap");
+  if(!name||!an||!ae||ap.length<6)return say("Enter organisation name, admin name, email and a 6+ character password.",true);
+  const modules=fullMods(Object.keys(MODS).filter(k=>$("#nm_"+k)&&$("#nm_"+k).checked));
+  let sec;
+  try{
+    sec=firebase.initializeApp(CFG,"sec"+Date.now());
+    const c=await sec.auth().createUserWithEmailAndPassword(ae,ap);await sec.auth().signOut();
+    const ref=db.collection("orgs").doc(),b=db.batch();
+    b.set(ref,{name,active:true,modules,validUntil:0,createdAt:Date.now()});
+    b.set(db.doc("orgs/"+ref.id+"/users/"+c.user.uid),{name:an,email:ae,role:"admin"});
+    b.set(db.doc("userOrg/"+c.user.uid),{orgId:ref.id});
+    await b.commit();await loadOrgs();say(`${name} created. Give ${ae} the temporary password.`);
+  }catch(e){err(e)}finally{if(sec)sec.delete()}
+};
+const orgUpd=async(id,d,msg)=>{try{await db.doc("orgs/"+id).update(d);await loadOrgs();say(msg)}catch(e){err(e)}};
+window.toggleMod=(id,k,on)=>{
+  const m={...(orgsList.find(x=>x.id===id).modules||{})};
+  (on?reqAll(k):depsOf(k)).forEach(x=>m[x]=on);
+  orgUpd(id,{modules:m},on?`${MODS[k].label} enabled (with anything it needs).`:`${MODS[k].label} disabled (with anything that depends on it).`);
+};
+window.setAll=(id,on)=>orgUpd(id,{modules:Object.fromEntries(Object.keys(MODS).map(k=>[k,on]))},on?"All modules enabled.":"All modules disabled.");
+window.setActive=(id,on)=>orgUpd(id,{active:on},on?"Organisation reactivated.":"Organisation suspended: its users are locked out.");
+window.setValid=(id,v)=>orgUpd(id,{validUntil:v?new Date(v+"T23:59:59").getTime():0},v?"Expiry saved.":"Expiry cleared.");
+window.enterOrg=async id=>{
+  try{orgId=id;me.role="admin";tab="";await loadAll();draw();window.scrollTo(0,0)}catch(e){orgId=null;org=null;me.role="super";tab="orgs";err(e)}
+};
+window.leaveOrg=async()=>{orgId=null;org=null;me.role="super";resetData();tab="orgs";await loadOrgs();draw()};
+window.migrate=async()=>{
+  const oid=gv("mg");if(!oid)return say("Create an organisation first.",true);
+  if(!confirm("Import the old data into this organisation?"))return;
+  const base=p=>db.doc("orgs/"+oid+"/"+p),W=[],n={};
+  try{
+    for(const c of ["items","warehouses","stock","products","challans"]){const s=await db.collection(c).get();n[c]=s.size;s.forEach(d=>W.push([base(c+"/"+d.id),d.data()]))}
+    const co=await db.doc("settings/company").get();if(co.exists)W.push([base("settings/company"),co.data()]);
+    const ct=await db.doc("meta/counters").get();if(ct.exists)W.push([base("counters/main"),ct.data()]);
+    const us=await db.collection("users").get();n.users=0;
+    us.forEach(d=>{if(d.id===me.uid)return;const u=d.data();n.users++;W.push([base("users/"+d.id),{name:u.name||"",email:u.email||"",role:u.role}]);W.push([db.doc("userOrg/"+d.id),{orgId:oid}])});
+    for(let i=0;i<W.length;i+=400){const b=db.batch();W.slice(i,i+400).forEach(([r,d])=>b.set(r,d));await b.commit()}
+    say("Imported: "+Object.entries(n).map(([k,v])=>v+" "+k).join(", ")+".");
+  }catch(e){err(e)}
+};
+
 </script></body></html>
