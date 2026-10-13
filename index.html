@@ -2,6 +2,9 @@
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#14594a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>StockBill – Phase 3 (multi-organisation)</title>
 <style>
 :root{--bg:#f3f5f2;--card:#fff;--ink:#1d2a24;--mut:#66756d;--line:#d9e0db;--pri:#14594a;--pri2:#0e4337;--bad:#b3261e;--ok:#1b7a3d}
@@ -39,6 +42,8 @@ table.pr th,table.pr td{border:1px solid var(--ink)}
 .mods{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:6px}
 label.chk{display:flex;align-items:center;gap:7px;font-size:14px;color:var(--ink);margin:0}
 input[type=checkbox]{width:auto}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50;padding:12px}
+.mbox{background:#fff;border-radius:12px;padding:18px;max-width:460px;width:100%;max-height:92vh;overflow:auto}
 </style></head><body>
 <div id="app"></div>
 
@@ -62,9 +67,9 @@ const MODS={
   warehouse:{label:"Warehouse",desc:"Warehouse master",requires:[],dflt:true},
   inventory:{label:"Inventory",desc:"Items, Excel upload, product compositions, stock ledger",requires:["warehouse"],dflt:true},
   sales:{label:"Sales (challans)",desc:"Delivery challans, returns, manager verification",requires:["inventory"]},
-  billing:{label:"Billing",desc:"Challan-to-bill, GST, payments",requires:["inventory"],soon:true},
-  purchase:{label:"Purchase",desc:"Purchase orders and receipts",requires:["inventory"],soon:true},
-  reports:{label:"Reports & dashboards",desc:"Analytics",requires:[],soon:true}
+  billing:{label:"Billing",desc:"GST bills from challans, payments, UPI/NEFT details",requires:["sales"]},
+  purchase:{label:"Purchase",desc:"Purchase orders and goods receipts into warehouses",requires:["inventory"]},
+  reports:{label:"Reports & dashboards",desc:"Sales, receivables, stock value, exceptions, CSV download",requires:[]}
 };
 const reqAll=(k,s=new Set())=>{if(s.has(k))return s;s.add(k);MODS[k].requires.forEach(r=>reqAll(r,s));return s};            // k + everything it needs
 const depsOf=(k,s=new Set())=>{if(s.has(k))return s;s.add(k);Object.keys(MODS).filter(x=>MODS[x].requires.includes(k)).forEach(x=>depsOf(x,s));return s}; // k + everything needing it
@@ -79,10 +84,14 @@ const D=p=>db.doc("orgs/"+orgId+"/"+p);             // this organisation's docum
 const has=m=>!!(org&&org.modules&&org.modules[m]);
 const orgOK=()=>org&&org.active!==false&&(!org.validUntil||Date.now()<=org.validUntil);
 const canEdit=()=>me&&(me.role==="admin"||me.role==="manager");
+/* ---------- AUDIT LOG: who changed what (append-only, see rules) ---------- */
+const auditRec=(action,entity,ref,detail)=>({action,entity,ref:String(ref??""),detail:String(detail??"").slice(0,300),by:me?me.name:"",uid:me?me.uid:"",at:Date.now()});
+const auditTo=(oid,action,entity,ref,detail)=>db.collection("orgs/"+oid+"/audit").add(auditRec(action,entity,ref,detail)).catch(e=>console.warn("audit write failed",e));
+const audit=(action,entity,ref,detail)=>auditTo(orgId,action,entity,ref,detail);
 const isAdmin=()=>me&&me.role==="admin";
 function say(t,e){note=`<div class="msg ${e?"e":""}">${esc(t)}</div>`;draw()}
 function err(e){say(e.message||String(e),true)}
-const resetData=()=>{items=[];whs=[];stock=[];products=[];challans=[];company={};users=[]};
+const resetData=()=>{items=[];whs=[];stock=[];products=[];challans=[];company={};users=[];auditRows=[];bills=[];bd=null;viewingBill=null;purchases=[];pu=null;viewingPO=null};
 
 auth.onAuthStateChanged(async u=>{
   if(busy)return;
@@ -161,6 +170,8 @@ async function loadAll(){
   })());
   if(has("warehouse"))P.push((async()=>{const w=await O("warehouses").orderBy("name").get();whs=w.docs.map(d=>({id:d.id,...d.data()}))})());
   if(has("sales"))P.push((async()=>{const c=await O("challans").orderBy("at","desc").limit(300).get();challans=c.docs.map(d=>({id:d.id,...d.data()}))})());
+  if(has("billing"))P.push((async()=>{const b=await O("bills").orderBy("at","desc").limit(300).get();bills=b.docs.map(d=>({id:d.id,...d.data()}))})());
+  if(has("purchase"))P.push((async()=>{const p=await O("purchases").orderBy("at","desc").limit(300).get();purchases=p.docs.map(d=>({id:d.id,...d.data()}))})());
   P.push((async()=>{const co=await D("settings/company").get();company=co.exists?co.data():{}})());
   if(isAdmin())P.push((async()=>{const u=await O("users").get();users=u.docs.map(d=>({id:d.id,...d.data()}))})());
   await Promise.all(P);
@@ -168,16 +179,16 @@ async function loadAll(){
 
 function tabsFor(){
   if(!orgId)return [{k:"orgs",l:"Organisations",on:true}];
-  const t=[["items","Items","inventory"],["whs","Warehouses","warehouse"],["stock","Stock","inventory"],["products","Products","inventory"],["challans","Challans","sales"]]
-    .map(([k,l,m])=>({k,l,on:has(m)}));
-  if(isAdmin())t.push({k:"users",l:"Users",on:true},{k:"company",l:"Company & plan",on:true});
+  const t=[["items","Items","inventory"],["whs","Warehouses","warehouse"],["stock","Stock","inventory"],["products","Products","inventory"],["challans","Challans","sales"],["bills","Bills","billing"],["purchases","Purchase","purchase"],["reports","Reports","reports"]]
+    .map(([k,l,m])=>({k,l,on:has(m)&&(k!=="reports"||canEdit())}));
+  if(isAdmin())t.push({k:"users",l:"Users",on:true},{k:"audit",l:"Audit log",on:true},{k:"company",l:"Company & plan",on:true});
   return t;
 }
-window.goTab=k=>{tab=k;note="";editing=null;pd=null;cd=null;calc=null;viewing=null;draw()};
+window.goTab=k=>{tab=k;note="";editing=null;pd=null;cd=null;calc=null;viewing=null;bd=null;viewingBill=null;pu=null;viewingPO=null;if(k==="audit"){loadAudit().then(draw);return}draw()};
 function draw(){
   const ts=tabsFor();
   if(!ts.some(t=>t.k===tab&&t.on))tab=(ts.find(t=>t.on)||{k:""}).k;
-  const views={items:itemsView,whs:whView,stock:stockView,products:productsView,challans:challansView,users:usersView,company:companyView,orgs:orgsView};
+  const views={items:itemsView,whs:whView,stock:stockView,products:productsView,challans:challansView,users:usersView,audit:auditView,bills:billsView,purchases:purchasesView,reports:reportsView,company:companyView,orgs:orgsView};
   $("#app").innerHTML=`<header><b>StockBill</b><small>${org?esc(org.name)+" · ":""}${esc(me.name)} · ${ROLES[me.role]}</small>
   ${me.super&&orgId?`<button class="b s" onclick="leaveOrg()">← Platform</button>`:""}
   <button class="b s" onclick="auth.signOut()">Log out</button></header>
@@ -213,9 +224,18 @@ window.saveItem=async()=>{
   const code=($("#ic").value||"").trim(),name=$("#in").value.trim();
   if(!code||!name)return say("Item code and name are required.",true);
   const d={code,name,unit:$("#iu").value.trim()||"pcs",hsn:$("#ih").value.trim(),gst:Number($("#ig").value)||0,rate:Number($("#ir").value)||0};
-  try{await D("items/"+iid(code)).set(d,{merge:true});editing=null;await loadAll();say("Item saved.")}catch(e){err(e)}
+  try{await D("items/"+iid(code)).set(d,{merge:true});await audit("Saved","Item",iid(code),name+" · rate "+d.rate+" · GST "+d.gst+"%");editing=null;await loadAll();say("Item saved.")}catch(e){err(e)}
 };
-window.delItem=async id=>{if(!confirm("Delete this item?"))return;try{await D("items/"+id).delete();await loadAll();say("Item deleted.")}catch(e){err(e)}};
+window.delItem=async id=>{
+  const used=stock.some(s=>s.item===id)||products.some(p=>(p.lines||[]).some(l=>l.item===id));
+  let ex=null;
+  if(used){
+    ex=await askException("Delete item that has history",`${id} is still used by stock or products. Those records stay and show the item code.`);
+    if(!ex)return;
+  }
+  if(!confirm("Delete this item?"))return;
+  try{await D("items/"+id).delete();await audit(ex?"Exception delete":"Deleted","Item",id,ex?ex.reason+" (approved by "+ex.approver+")":"");await loadAll();say("Item deleted.")}catch(e){err(e)}
+};
 window.tpl=()=>{
   const ws=XLSX.utils.aoa_to_sheet([["Code","Name","Unit","HSN","GST%","Rate"],["ITM001","Sample item","pcs","1905",18,100]]);
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Items");XLSX.writeFile(wb,"items_template.xlsx");
@@ -234,7 +254,7 @@ window.upl=async()=>{
     for(let i=0;i<ok.length;i+=400){
       const b=db.batch();ok.slice(i,i+400).forEach(d=>b.set(D("items/"+iid(d.code)),d,{merge:true}));await b.commit();
     }
-    await loadAll();say(`${ok.length} items saved.${bad.length?` Skipped rows (missing code or name): ${bad.join(", ")}.`:""}`,bad.length>0&&!ok.length);
+    await audit("Uploaded","Item",f.name,ok.length+" items");await loadAll();say(`${ok.length} items saved.${bad.length?` Skipped rows (missing code or name): ${bad.join(", ")}.`:""}`,bad.length>0&&!ok.length);
   }catch(e){err(e)}
 };
 
@@ -250,12 +270,22 @@ function whView(){
 }
 window.addWh=async()=>{
   const name=$("#wn").value.trim();if(!name)return say("Warehouse name is required.",true);
-  try{await O("warehouses").add({name,location:$("#wl").value.trim(),incharge:$("#wi").value.trim()});await loadAll();say("Warehouse saved.")}catch(e){err(e)}
+  try{await O("warehouses").add({name,location:$("#wl").value.trim(),incharge:$("#wi").value.trim()});await audit("Created","Warehouse",name,"");await loadAll();say("Warehouse saved.")}catch(e){err(e)}
 };
-window.delWh=async id=>{if(!confirm("Delete this warehouse?"))return;try{await D("warehouses/"+id).delete();await loadAll();say("Warehouse deleted.")}catch(e){err(e)}};
+window.delWh=async id=>{
+  const used=stock.some(s=>s.wh===id)||challans.some(c=>c.wh===id);
+  let ex=null;
+  if(used){
+    ex=await askException("Delete warehouse that has history",`${wName(id)} still has stock or challans. Those records stay.`);
+    if(!ex)return;
+  }
+  if(!confirm("Delete this warehouse?"))return;
+  try{await D("warehouses/"+id).delete();await audit(ex?"Exception delete":"Deleted","Warehouse",wName(id),ex?ex.reason+" (approved by "+ex.approver+")":"");await loadAll();say("Warehouse deleted.")}catch(e){err(e)}
+};
 
 /* ---------- STOCK LEDGER ---------- */
 const MT={in:"Stock in",out:"Stock out",return:"Returned",damage:"Damaged"};
+const iItemLabel=id=>(items.find(x=>x.id===id)||{}).code||id;
 const wName=id=>(whs.find(w=>w.id===id)||{}).name||id, iName=id=>(items.find(x=>x.id===id)||{}).name||id;
 function balances(){const m={};stock.forEach(s=>{const k=s.wh+"|"+s.item,o=m[k]||(m[k]={in:0,out:0,return:0,damage:0});o[s.type]+=s.qty});return m}
 const avail=o=>o?o.in+o.return-o.out-o.damage:0;
@@ -279,8 +309,12 @@ window.addMove=async()=>{
   if(!wh||!item)return say("Add a warehouse and an item first.",true);
   if(!(qty>0))return say("Enter a quantity above zero.",true);
   const have=avail(balances()[wh+"|"+item]);
-  if((type==="out"||type==="damage")&&qty>have)return say(`Only ${have} available in this warehouse.`,true);
-  try{await O("stock").add({wh,item,type,qty,ref:$("#sr").value.trim(),by:me.name,at:Date.now()});await loadAll();say("Movement saved.")}catch(e){err(e)}
+  let ex=null;
+  if((type==="out"||type==="damage")&&qty>have){
+    ex=await askException("Stock out beyond availability",`${iItemLabel(item)} in ${wName(wh)}: taking ${qty}, only ${have} available`);
+    if(!ex)return;
+  }
+  try{const ref=$("#sr").value.trim();await O("stock").add({wh,item,type,qty,ref,by:me.name,at:Date.now(),exception:ex});await audit(ex?"Exception stock "+type:"Stock "+type,"Stock",iItemLabel(item),wName(wh)+" · qty "+qty+(ref?" · "+ref:"")+(ex?" · "+ex.reason:""));await loadAll();say("Movement saved.")}catch(e){err(e)}
 };
 
 /* ---------- USERS (organisation admin) ---------- */
@@ -307,13 +341,17 @@ window.addUser=async()=>{
     b.set(D("users/"+c.user.uid),{name,email,role});
     b.set(db.doc("userOrg/"+c.user.uid),{orgId});
     await b.commit();
-    await loadAll();say("User created. Share the email and temporary password with them.");
+    await audit("Created","User",email,"role "+role);await loadAll();say("User created. Share the email and temporary password with them.");
   }catch(e){err(e)}finally{if(sec)sec.delete()}
 };
-window.setRole=async(id,role)=>{try{await D("users/"+id).update({role});await loadAll();say("Role updated.")}catch(e){err(e)}};
+window.setRole=async(id,role)=>{
+  const u=users.find(x=>x.id===id)||{};
+  try{await D("users/"+id).update({role});await audit("Role changed","User",u.email||id,(u.role||"?")+" → "+role);await loadAll();say("Role updated.")}catch(e){err(e)}
+};
 window.revoke=async id=>{
   if(!confirm("Remove this user's access?"))return;
-  try{const b=db.batch();b.delete(D("users/"+id));b.delete(db.doc("userOrg/"+id));await b.commit();await loadAll();say("Access removed.")}catch(e){err(e)}
+  const u=users.find(x=>x.id===id)||{};
+  try{const b=db.batch();b.delete(D("users/"+id));b.delete(db.doc("userOrg/"+id));await b.commit();await audit("Access removed","User",u.email||id,"");await loadAll();say("Access removed.")}catch(e){err(e)}
 };
 
 /* ================= PHASE 3 ================= */
@@ -374,10 +412,10 @@ window.saveProduct=async()=>{
   if(!pd.lines.length)return say("Add at least one item to the composition.",true);
   try{
     await D("products/"+iid(code)).set({code,name,unit:pd.unit.trim()||"set",lines:pd.lines,by:me.name,at:Date.now()});
-    pd=null;await loadAll();say("Product saved. Existing challans keep the composition they were created with.");
+    await audit("Saved","Product",iid(code),name+" · "+pd.lines.length+" lines");pd=null;await loadAll();say("Product saved. Existing challans keep the composition they were created with.");
   }catch(e){err(e)}
 };
-window.delProduct=async id=>{if(!confirm("Delete this product? Existing challans are not affected."))return;try{await D("products/"+id).delete();await loadAll();say("Product deleted.")}catch(e){err(e)}};
+window.delProduct=async id=>{if(!confirm("Delete this product? Existing challans are not affected."))return;try{await D("products/"+id).delete();await audit("Deleted","Product",id,"");await loadAll();say("Product deleted.")}catch(e){err(e)}};
 window.runCalc=()=>{calc={wh:gv("kw"),p:gv("kp"),q:Number(gv("kq"))||0};draw()};
 function calcOut(){
   const p=products.find(x=>x.id===calc.p);if(!p||!calc.wh)return"";
@@ -442,7 +480,7 @@ window.cdAdd=()=>{
   draw();
 };
 window.cdDel=i=>{cdSync();cd.lines.splice(i,1);draw()};
-const stockDoc=(wh,item,type,qty,ref,cid)=>({wh,item,type,qty,ref,challan:cid,by:me.name,at:Date.now()});
+const stockDoc=(wh,item,type,qty,ref,cid,ex)=>({wh,item,type,qty,ref,challan:cid,by:me.name,at:Date.now(),exception:ex||null});
 window.createChallan=async()=>{
   cdSync();
   if(!cd.wh)return say("Choose a warehouse.",true);
@@ -451,7 +489,13 @@ window.createChallan=async()=>{
   try{
     await loadAll();
     const nd=needOf(cd.lines),b=balances();
-    for(const [i,n] of Object.entries(nd)){const h=avail(b[cd.wh+"|"+i]);if(n>h)return say(`${iName(i)}: need ${n}, only ${h} available in ${wName(cd.wh)}.`,true)}
+    const shorts=Object.entries(nd).map(([i,n])=>({i,n,h:avail(b[cd.wh+"|"+i])})).filter(x=>x.n>x.h);
+    const shortSet=new Set(shorts.map(x=>x.i));
+    let ex=null;
+    if(shorts.length){
+      ex=await askException("Dispatch with short stock",shorts.map(x=>`${iName(x.i)}: need ${x.n}, have ${x.h} in ${wName(cd.wh)}`).join("; "));
+      if(!ex)return;
+    }
     const ref=O("challans").doc(),cref=D("counters/main"),at=Date.now();
     let no;
     await db.runTransaction(async t=>{
@@ -459,8 +503,9 @@ window.createChallan=async()=>{
       no="CH-"+String(n).padStart(4,"0");
       t.set(cref,{challan:n},{merge:true});
       t.set(ref,{no,wh:cd.wh,whName:wName(cd.wh),date:cd.date||today(),party:cd.party.trim(),addr:cd.addr.trim(),gstin:cd.gstin.trim(),phone:cd.phone.trim(),vehicle:cd.vehicle.trim(),note:cd.note.trim(),
-        lines:cd.lines,status:"dispatched",createdBy:me.name,createdUid:me.uid,at,log:[{t:"Created and dispatched",by:me.name,at}]});
-      Object.entries(nd).forEach(([i,n2])=>t.set(O("stock").doc(),stockDoc(cd.wh,i,"out",n2,no,ref.id)));
+        lines:cd.lines,exception:ex,status:"dispatched",createdBy:me.name,createdUid:me.uid,at,log:[{t:"Created and dispatched",by:me.name,at}]});
+      Object.entries(nd).forEach(([i,n2])=>t.set(O("stock").doc(),stockDoc(cd.wh,i,"out",n2,no,ref.id,shortSet.has(i)?ex:null)));
+      t.set(O("audit").doc(),auditRec(ex?"Exception dispatch":"Created","Challan",no,cd.party.trim()+" · "+cd.lines.length+" lines"+(ex?" · "+ex.reason:"")));
     });
     cd=null;viewing=ref.id;await loadAll();say(`Challan ${no} created. Stock deducted.`);
   }catch(e){err(e)}
@@ -470,7 +515,7 @@ function challanDetail(){
   const c=challans.find(x=>x.id===viewing);if(!c){viewing=null;return challansView()}
   const k=company,live=c.status!=="cancelled",anyPend=c.lines.some(l=>pend(l)>0);
   const canVerify=canEdit()&&c.status==="dispatched"&&(isAdmin()||c.createdUid!==me.uid);
-  const showRet=live&&canCreateCh()&&anyPend,showBill=live&&canBill()&&anyPend;
+  const showRet=live&&canCreateCh()&&anyPend,showBill=live&&canBill()&&anyPend&&!has("billing");
   const untouched=c.lines.every(l=>!l.billed&&!l.returned);
   return `<div class="row noprint" style="margin:0 0 10px"><button class="b s" onclick="viewing=null;draw()">← All challans</button><button class="b" onclick="window.print()">Print challan</button>
   ${canVerify?`<button class="b" onclick="verifyCh()">Verify (manager)</button>`:""}
@@ -493,6 +538,7 @@ function challanDetail(){
 const logEv=(d,t)=>[...(d.log||[]),{t,by:me.name,at:Date.now()}];
 window.recQty=async mode=>{
   const c=challans.find(x=>x.id===viewing),pre=mode==="return"?"rt":"bl";
+  if(!c)return say("Open a challan first.",true);
   const qs=c.lines.map((l,i)=>Number(gv(pre+i))||0);
   if(!qs.some(q=>q>0))return say("Enter a quantity first.",true);
   try{
@@ -509,6 +555,7 @@ window.recQty=async mode=>{
       });
       t.update(ref,{lines,log:logEv(d,(mode==="return"?"Returned: ":"Billed: ")+txt.join(", "))});
       Object.entries(nd).forEach(([it,n])=>t.set(O("stock").doc(),stockDoc(d.wh,it,"return",n,d.no+" return",c.id)));
+      t.set(O("audit").doc(),auditRec(mode==="return"?"Returned":"Billed","Challan",d.no,txt.join(", ")));
     });
     await loadAll();say(mode==="return"?"Return recorded and stock updated.":"Billed quantity recorded.");
   }catch(e){err(e)}
@@ -520,6 +567,7 @@ window.verifyCh=async()=>{
       const ref=D("challans/"+id),s=await t.get(ref),d=s.data();
       if(d.status!=="dispatched")throw new Error("Already "+d.status+".");
       t.update(ref,{status:"verified",verifiedBy:me.name,verifiedAt:Date.now(),log:logEv(d,"Verified by manager")});
+      t.set(O("audit").doc(),auditRec("Verified","Challan",d.no,"by manager"));
     });
     await loadAll();say("Challan verified.");
   }catch(e){err(e)}
@@ -533,12 +581,643 @@ window.cancelCh=async()=>{
       if(d.status==="cancelled")throw new Error("Already cancelled.");
       if(d.lines.some(l=>l.billed||l.returned))throw new Error("Cannot cancel: quantities already billed or returned.");
       t.update(ref,{status:"cancelled",log:logEv(d,"Cancelled; stock restored")});
+      t.set(O("audit").doc(),auditRec("Cancelled","Challan",d.no,"stock restored"));
       Object.entries(needOf(d.lines)).forEach(([it,n])=>t.set(O("stock").doc(),stockDoc(d.wh,it,"return",n,d.no+" cancelled",id)));
     });
     await loadAll();say("Challan cancelled and stock restored.");
   }catch(e){err(e)}
 };
 
+
+/* ================= BILLING (GST invoices, payments) ================= */
+let bills=[],bd=null,viewingBill=null;
+const PAYMODES=["UPI","NEFT/RTGS","Cash","Cheque","Other"];
+const money=n=>Math.round((Number(n)||0)*100)/100;
+const toPaise=n=>Math.round((Number(n)||0)*100);
+const fmt=n=>money(n).toFixed(2);
+const stateCode=g=>{const s=String(g||"").trim();return /^\d{2}/.test(s)?s.slice(0,2):""};
+const isInterState=(sellerGstin,buyerGstin)=>{const a=stateCode(sellerGstin),b=stateCode(buyerGstin);return !!(a&&b&&a!==b)};
+// Split an amount in proportion to weights. Paise-exact; the rounding remainder goes to the largest weights.
+function splitByRatio(total,weights){
+  const T=toPaise(total),w=weights.map(x=>Math.max(0,Number(x)||0)),W=w.reduce((a,b)=>a+b,0);
+  if(!w.length)return [];
+  const base=W>0?w.map(x=>Math.floor(T*x/W)):w.map(()=>Math.floor(T/w.length));
+  let rem=T-base.reduce((a,b)=>a+b,0);
+  const order=w.map((_,i)=>i).sort((a,b)=>(W>0?w[b]-w[a]:0)||a-b);
+  for(let k=0;rem>0;k++,rem--)base[order[k%order.length]]++;
+  return base.map(p=>p/100);
+}
+// GST on a taxable amount. Intra-state: CGST and SGST (SGST takes any odd paisa). Inter-state: IGST.
+function taxOf(taxable,gst,inter){
+  const tr=Math.round(toPaise(taxable)*(Number(gst)||0)/100);
+  if(inter)return {cgst:0,sgst:0,igst:tr/100};
+  const cg=Math.floor(tr/2);return {cgst:cg/100,sgst:(tr-cg)/100,igst:0};
+}
+function billRow(it,code,qty,taxable,inter,from,rate){
+  const gst=Number(it.gst)||0,tx=taxOf(taxable,gst,inter);
+  return {code,name:it.name||code,hsn:it.hsn||"",unit:it.unit||"pcs",qty:rnd(qty),rate:rate!==undefined?rate:(qty?money(taxable/qty):0),
+    taxable:money(taxable),gst,cgst:tx.cgst,sgst:tx.sgst,igst:tx.igst,amount:money(taxable+tx.cgst+tx.sgst+tx.igst),from:from||""};
+}
+// Turn challan selections into bill lines. sel[i] = {qty, rate, amt, comp:[...]} as typed; "" means default.
+// Returns {lines, used} and throws a readable error if a quantity or split is wrong.
+function billLinesFor(lines,sel,itemsById,inter,opts){
+  const over=!!(opts&&opts.over);
+  const out=[],used=[];
+  lines.forEach((l,i)=>{
+    const s=sel[i]||{},q=Number(s.qty)||0;
+    if(q<=0)return;
+    const room=pend(l);
+    if(q>room+1e-9&&!over)throw new Error(`${l.name}: only ${room} pending.`);
+    used.push({li:i,q});
+    if(l.kind==="product"){
+      const comps=l.comp||[],weights=comps.map(c=>((itemsById[c.item]||{}).rate||0)*c.qty*q);
+      const amt=(s.amt!==undefined&&s.amt!=="")?money(s.amt):money(weights.reduce((a,b)=>a+b,0));
+      const fixed=comps.map((_,j)=>{const v=(s.comp||[])[j];return (v!==undefined&&v!=="")?money(v):null});
+      const fixedSum=money(fixed.reduce((a,v)=>a+(v||0),0));
+      const free=comps.map((_,j)=>j).filter(j=>fixed[j]===null);
+      if(fixedSum>amt+0.005)throw new Error(`${l.name}: component amounts add to ${fixedSum}, more than the product amount ${amt}.`);
+      const amounts=fixed.slice();
+      if(free.length){const rest=splitByRatio(money(amt-fixedSum),free.map(j=>weights[j]));free.forEach((j,k)=>amounts[j]=rest[k])}
+      else if(Math.abs(fixedSum-amt)>0.005)throw new Error(`${l.name}: component amounts add to ${fixedSum}, but the product amount is ${amt}.`);
+      comps.forEach((c,j)=>{const it=itemsById[c.item]||{};out.push(billRow(it,c.item,c.qty*q,amounts[j],inter,l.code+" "+l.name))});
+    }else{
+      const it=itemsById[l.ref]||{};
+      const rate=(s.rate!==undefined&&s.rate!=="")?money(s.rate):money(it.rate||0);
+      out.push(billRow(it,l.ref,q,money(q*rate),inter,null,rate));
+    }
+  });
+  return {lines:out,used};
+}
+function billTotals(lines){
+  const sum=k=>money(lines.reduce((a,l)=>a+(l[k]||0),0));
+  const taxable=sum("taxable"),cgst=sum("cgst"),sgst=sum("sgst"),igst=sum("igst");
+  const grand=money(taxable+cgst+sgst+igst),total=Math.round(grand);
+  return {taxable,cgst,sgst,igst,tax:money(cgst+sgst+igst),grand,roundOff:money(total-grand),total};
+}
+const paidOf=b=>money((b.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0));
+const balanceOf=b=>money((b.total||0)-paidOf(b));
+const payStatusOf=b=>{if(b.cancelled)return "cancelled";const bal=balanceOf(b),p=paidOf(b);return bal<=0?"paid":p>0?"partial":"unpaid"};
+const billBadge=b=>{const m={paid:["Paid","ok"],partial:["Part paid","w"],unpaid:["Unpaid","w"],cancelled:["Cancelled","x"]}[b.status||payStatusOf(b)];return `<span class="badge ${m[1]}">${m[0]}</span>`};
+const itemsById=()=>Object.fromEntries(items.map(i=>[i.id,i]));
+const payFrom=p=>{const amount=money(p.amount);if(!(amount>0))return null;return {mode:PAYMODES.includes(p.mode)?p.mode:"Other",amount,ref:String(p.ref||"").trim(),date:p.date||today()}};
+function bdNew(){return {mode:"challan",cid:"",date:today(),inter:false,sel:[],party:"",gstin:"",addr:"",phone:"",direct:[{code:"",qty:"",rate:""}],pay:{mode:"UPI",amount:"",ref:"",date:today()}}}
+function bdDefaults(c){return c.lines.map(l=>({qty:pend(l),rate:"",amt:"",comp:[]}))}
+// What would need an exception for this challan selection?
+function challanIssues(c,sel){
+  const out=[];
+  if(c.status==="cancelled")out.push("challan "+c.no+" is cancelled");
+  c.lines.forEach((l,i)=>{const q=Number((sel[i]||{}).qty)||0;if(q>0&&q>pend(l)+1e-9)out.push(`${l.name}: billing ${q}, only ${pend(l)} pending`)});
+  return out;
+}
+function bdSync(){
+  if(!bd)return;
+  bd.date=gv("bdt")||bd.date||today();
+  if($("#bint"))bd.inter=$("#bint").checked;
+  if($("#pamt"))bd.pay={mode:gv("pmode")||"UPI",amount:gv("pamt"),ref:gv("pref"),date:gv("pdt2")||today()};
+  if($("#dp")){
+    bd.party=gv("dp");bd.gstin=gv("dg");bd.addr=gv("da");bd.phone=gv("dph");
+    bd.direct=bd.direct.map((_,i)=>({code:gv("di"+i),qty:gv("dq"+i),rate:gv("dr"+i)}));
+  }
+  const c=challans.find(x=>x.id===bd.cid);
+  if(bd.mode==="challan"&&c&&$("#bq0")!==null)bd.sel=c.lines.map((l,i)=>({qty:gv("bq"+i),rate:gv("br"+i),amt:gv("ba"+i),comp:(l.comp||[]).map((_,j)=>gv("bc"+i+"_"+j))}));
+}
+window.setBillMode=m=>{bdSync();bd.mode=m;draw()};
+window.pickBillChallan=()=>{
+  bdSync();
+  const id=gv("bcid"),c=challans.find(x=>x.id===id);
+  bd.cid=id;bd.sel=c?bdDefaults(c):[];if(c)bd.inter=isInterState(company.gstin,c.gstin);draw();
+};
+window.dirAdd=()=>{bdSync();bd.direct.push({code:"",qty:"",rate:""});draw()};
+window.dirDel=i=>{bdSync();bd.direct.splice(i,1);if(!bd.direct.length)bd.direct.push({code:"",qty:"",rate:""});draw()};
+window.dirPick=i=>{bdSync();const r=bd.direct[i],it=itemsById()[r.code];if(it&&(r.rate===""||r.rate===undefined))r.rate=it.rate||"";draw()};
+function billDraftView(){
+  const items=itemsById(),direct=bd.mode==="direct";
+  const modeBar=`<div class="row" style="margin:0 0 8px"><button class="b ${direct?"s":""}" onclick="setBillMode('challan')">From challan</button><button class="b ${direct?"":"s"}" onclick="setBillMode('direct')">Direct bill (exception)</button></div>`;
+  const payRow=`<h2>Payment received now (optional)</h2><div class="g">
+    <div><label>Mode</label><select id="pmode">${PAYMODES.map(m=>`<option ${m===(bd.pay||{}).mode?"selected":""}>${m}</option>`).join("")}</select></div>
+    <div><label>Amount</label><input id="pamt" type="number" min="0" step="0.01" value="${esc((bd.pay||{}).amount)}"></div>
+    <div><label>UPI txn id / UTR / cheque no.</label><input id="pref" value="${esc((bd.pay||{}).ref)}"></div>
+    <div><label>Date</label><input id="pdt2" type="date" value="${esc((bd.pay||{}).date||today())}"></div></div>
+    <div class="row"><button class="b s" onclick="bdSync();draw()">Update totals</button><button class="b" onclick="saveBill()">Save bill</button><button class="b s" onclick="bd=null;draw()">Discard</button></div></div>`;
+  const interBox=`<div class="row"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="bint" ${bd.inter?"checked":""}> Inter-state supply (IGST)</label></div>`;
+  const dateBox=`<div><label>Bill date</label><input id="bdt" type="date" value="${esc(bd.date)}"></div>`;
+  if(direct){
+    const itemOpts=sel=>`<option value="">Choose item…</option>${Object.values(items).sort((a,b)=>a.code.localeCompare(b.code)).map(i=>`<option value="${esc(i.id)}" ${i.id===sel?"selected":""}>${esc(i.code+" – "+i.name)}</option>`).join("")}`;
+    let prev="";
+    try{const ls=directLinesFor(bd.direct,items,bd.inter),t=billTotals(ls);prev=previewHtml(ls,t)}catch(e){prev=`<div class="msg e">${esc(e.message)}</div>`}
+    return `<div class="card">${modeBar}<div class="msg e" style="white-space:normal">Direct bill: no challan and no stock movement. A manager or admin must approve it before it is saved.</div>
+    <div class="g"><div><label>Party name</label><input id="dp" value="${esc(bd.party)}"></div><div><label>Party GSTIN</label><input id="dg" value="${esc(bd.gstin)}"></div>
+    <div><label>Party phone</label><input id="dph" value="${esc(bd.phone)}"></div>${dateBox}</div>
+    <div style="margin-top:8px"><label>Party address</label><input id="da" value="${esc(bd.addr)}"></div>
+    <div class="tw" style="margin-top:8px"><table><tr><th>Item</th><th>Qty</th><th>Rate</th><th></th></tr>
+    ${bd.direct.map((r,i)=>`<tr><td><select id="di${i}" onchange="dirPick(${i})">${itemOpts(r.code)}</select></td>
+    <td><input id="dq${i}" type="number" min="0" step="any" value="${esc(r.qty)}" style="width:90px"></td>
+    <td><input id="dr${i}" type="number" min="0" step="0.01" value="${esc(r.rate)}" style="width:110px"></td>
+    <td><button class="b d" onclick="dirDel(${i})">Remove</button></td></tr>`).join("")}</table></div>
+    <div class="row"><button class="b s" onclick="dirAdd()">+ Add line</button></div>
+    ${interBox}${prev}${payRow}</div>`;
+  }
+  const cs=challans.filter(c=>c.status!=="cancelled"&&c.lines.some(l=>pend(l)>0));
+  const c=challans.find(x=>x.id===bd.cid);
+  const head=`<div class="card">${modeBar}<div class="g"><div><label>Challan</label><select id="bcid" onchange="pickBillChallan()"><option value="">Choose…</option>${cs.map(x=>`<option value="${esc(x.id)}" ${x.id===bd.cid?"selected":""}>${esc(x.no)} · ${esc(x.party)} · ${dfmt(x.date)}</option>`).join("")}</select></div>${dateBox}</div>`;
+  if(!c)return head+`<p class="mut">Pick a challan. Only challans with quantity still to bill are listed. To bill without a challan, use a direct bill.</p></div>`;
+  const issues=challanIssues(c,bd.sel);
+  const rows=c.lines.map((l,i)=>{
+    const s=bd.sel[i]||{qty:pend(l),rate:"",amt:"",comp:[]},q=Number(s.qty)||0,over=q>pend(l)+1e-9;
+    const pt=`<span class="mut">pending ${pend(l)}</span>${over?` <span class="badge x">needs exception</span>`:""}`;
+    if(l.kind==="product"){
+      const dflt=money(l.comp.reduce((a,cc)=>a+((items[cc.item]||{}).rate||0)*cc.qty*q,0));
+      return `<tr><td style="white-space:normal"><b>${esc(l.code+" – "+l.name)}</b> ${pt}<div class="mut">${esc(compText(l.comp))}</div></td>
+      <td><input id="bq${i}" type="number" min="0" step="any" value="${esc(s.qty)}" style="width:80px"></td>
+      <td><input id="ba${i}" type="number" min="0" step="0.01" value="${esc(s.amt)}" placeholder="${dflt}" style="width:110px"></td>
+      <td style="white-space:normal">${l.comp.map((cc,j)=>`<div>${esc(cc.item)} <input id="bc${i}_${j}" type="number" step="0.01" value="${esc((s.comp||[])[j]??"")}" placeholder="auto" style="width:90px"></div>`).join("")}</td></tr>`;
+    }
+    const it=items[l.ref]||{};
+    return `<tr><td style="white-space:normal"><b>${esc(l.name)}</b> ${pt}</td>
+      <td><input id="bq${i}" type="number" min="0" step="any" value="${esc(s.qty)}" style="width:80px"></td>
+      <td><input id="br${i}" type="number" min="0" step="0.01" value="${esc(s.rate)}" placeholder="${money(it.rate||0)}" style="width:110px"></td><td></td></tr>`;
+  }).join("");
+  let prev="";
+  try{const b=billLinesFor(c.lines,bd.sel,items,bd.inter,{over:true}),t=billTotals(b.lines);prev=previewHtml(b.lines,t)}catch(e){prev=`<div class="msg e">${esc(e.message)}</div>`}
+  const warn=issues.length?`<div class="msg e" style="white-space:normal">Exception: ${esc(issues.join("; "))}. Saving asks a manager or admin to approve.</div>`:"";
+  return head+`${warn}<div class="tw"><table><tr><th>Challan line</th><th>Qty</th><th>Rate / product amount</th><th>Product split (optional)</th></tr>${rows}</table></div>
+  ${interBox}<p class="mut">Product amounts split across components by standard rate. Type an amount on a component to fix it; the rest re-splits.</p>
+  ${prev}${payRow}</div>`;
+}
+function previewHtml(lines,t){
+  return `<div class="tw"><table><tr><th>Item</th><th>HSN</th><th>Qty</th><th>Rate</th><th>Taxable</th><th>GST%</th><th>${"Tax"}</th><th>Amount</th></tr>
+  ${lines.map(l=>`<tr><td style="white-space:normal">${esc(l.name)}</td><td>${esc(l.hsn)}</td><td>${l.qty} ${esc(l.unit)}</td><td>${fmt(l.rate)}</td><td>${fmt(l.taxable)}</td><td>${l.gst}</td><td>${fmt(l.cgst+l.sgst+l.igst)}</td><td>${fmt(l.amount)}</td></tr>`).join("")}</table></div>
+  <div class="row" style="justify-content:flex-end"><table style="max-width:300px"><tr><td>Taxable</td><td>${fmt(t.taxable)}</td></tr><tr><td>Tax</td><td>${fmt(t.tax)}</td></tr><tr><td>Round off</td><td>${fmt(t.roundOff)}</td></tr><tr><td><b>Total</b></td><td><b>${fmt(t.total)}</b></td></tr></table></div>`;
+}
+window.saveBill=async()=>{
+  bdSync();
+  const items=itemsById(),direct=bd.mode==="direct";
+  const pay=bd.pay?payFrom(bd.pay):null;
+  if(bd.pay&&Number(bd.pay.amount)<0)return say("Payment amount cannot be negative.",true);
+  let c=null,issues=[];
+  try{
+    if(direct){
+      if(!(bd.party||"").trim())return say("Enter the party name.",true);
+      directLinesFor(bd.direct,items,bd.inter);
+      issues=["direct bill with no challan"];
+    }else{
+      c=challans.find(x=>x.id===bd.cid);
+      if(!c)return say("Choose a challan to bill, or use a direct bill.",true);
+      issues=challanIssues(c,bd.sel);
+      if(!issues.length)billLinesFor(c.lines,bd.sel,items,bd.inter);
+    }
+  }catch(e){return err(e)}
+  let ex=null;
+  if(issues.length){
+    ex=await askException(direct?"Direct bill (no challan)":"Bill beyond challan",issues.join("; "));
+    if(!ex)return;
+  }
+  const kref=D("counters/bill"),bref=O("bills").doc(),at=Date.now();
+  let no;
+  try{
+    await db.runTransaction(async t=>{
+      const ks=await t.get(kref);
+      let built,fresh=null,cref=null;
+      if(direct){built={lines:directLinesFor(bd.direct,items,bd.inter),used:[]}}
+      else{
+        cref=D("challans/"+c.id);fresh=(await t.get(cref)).data();
+        if(!fresh)throw new Error("Challan not found.");
+        const now=challanIssues(fresh,bd.sel);
+        if(now.length&&!ex)throw new Error("The challan changed while you were editing: "+now.join("; ")+". Review and try again.");
+        built=billLinesFor(fresh.lines,bd.sel,items,bd.inter,{over:true});
+        if(!built.used.length)throw new Error("Enter a quantity to bill.");
+      }
+      const tot=billTotals(built.lines);
+      const payments=pay?[{...pay,by:me.name,at}]:[];
+      if(paidOf({payments})>tot.total+0.005)throw new Error("Payment is more than the bill total.");
+      const n=((ks.exists&&ks.data().bill)||0)+1;no="INV-"+String(n).padStart(4,"0");
+      const log=[{t:direct?"Direct bill created":"Bill created from "+fresh.no,by:me.name,at}];
+      if(ex)log.push({t:"EXCEPTION: "+ex.type+" – "+ex.reason+" (approved by "+ex.approver+")",by:me.name,at});
+      const bill={no,date:bd.date||today(),direct,
+        party:direct?bd.party.trim():(fresh.party||""),addr:direct?(bd.addr||"").trim():(fresh.addr||""),
+        gstin:direct?(bd.gstin||"").trim():(fresh.gstin||""),phone:direct?(bd.phone||"").trim():(fresh.phone||""),
+        inter:!!bd.inter,challanIds:direct?[]:[c.id],challanNos:direct?[]:[fresh.no],lines:built.lines,
+        fromLines:built.used.map(u=>({cid:c.id,li:u.li,q:u.q})),
+        ...tot,payments,paid:paidOf({payments}),cancelled:false,exception:ex,createdBy:me.name,createdUid:me.uid,at,log};
+      bill.status=payStatusOf(bill);
+      if(!direct){
+        const lines=fresh.lines.map((l,i)=>{const u=built.used.find(x=>x.li===i);return u?{...l,billed:rnd((l.billed||0)+u.q)}:l});
+        t.update(cref,{lines,log:[...(fresh.log||[]),{t:"Billed in "+no+(ex?" (exception)":""),by:me.name,at}]});
+      }
+      t.set(kref,{bill:n},{merge:true});
+      t.set(bref,bill);
+      t.set(O("audit").doc(),auditRec(ex?"Exception bill":"Created","Bill",no,(direct?"direct to "+bill.party:fresh.no)+" · total "+tot.total+(ex?" · "+ex.type+": "+ex.reason:"")));
+    });
+    bd=null;viewingBill=bref.id;await loadAll();say(`Bill ${no} saved${ex?" with exception recorded":""}.`);
+  }catch(e){err(e)}
+};
+
+window.addPay=async id=>{
+  const amount=money(gv("pa_"+id)),mode=gv("pm_"+id)||"UPI",ref=gv("pr_"+id).trim(),date=gv("pd_"+id)||today();
+  if(!(amount>0))return say("Enter an amount above zero.",true);
+  try{
+    await db.runTransaction(async t=>{
+      const r=D("bills/"+id),b=(await t.get(r)).data();
+      if(!b)throw new Error("Bill not found.");
+      if(b.cancelled)throw new Error("This bill is cancelled.");
+      const bal=balanceOf(b);
+      if(amount>bal+0.005)throw new Error(`Amount is more than the balance of ${fmt(bal)}.`);
+      const payments=[...(b.payments||[]),{mode,amount,ref,date,by:me.name,at:Date.now()}];
+      const next={...b,payments};
+      t.update(r,{payments,paid:paidOf(next),status:payStatusOf(next),log:[...(b.log||[]),{t:"Payment: "+mode+" "+fmt(amount),by:me.name,at:Date.now()}]});
+      t.set(O("audit").doc(),auditRec("Payment","Bill",b.no,mode+" "+fmt(amount)+(ref?" · "+ref:"")));
+    });
+    await loadAll();say("Payment recorded.");
+  }catch(e){err(e)}
+};
+window.reversePay=async(id,idx)=>{
+  if(!confirm("Reverse this payment? It will be removed from the bill."))return;
+  try{
+    await db.runTransaction(async t=>{
+      const r=D("bills/"+id),b=(await t.get(r)).data();
+      const p=(b.payments||[])[idx];
+      if(!p)throw new Error("Payment not found.");
+      const payments=b.payments.filter((_,i)=>i!==idx),next={...b,payments};
+      t.update(r,{payments,paid:paidOf(next),status:payStatusOf(next),log:[...(b.log||[]),{t:"Payment reversed: "+p.mode+" "+fmt(p.amount),by:me.name,at:Date.now()}]});
+      t.set(O("audit").doc(),auditRec("Payment reversed","Bill",b.no,p.mode+" "+fmt(p.amount)+(p.ref?" · "+p.ref:"")));
+    });
+    await loadAll();say("Payment reversed.");
+  }catch(e){err(e)}
+};
+window.cancelBill=async id=>{
+  if(!confirm("Cancel this bill? Its billed quantities go back to the challan so they can be billed again."))return;
+  try{
+    await db.runTransaction(async t=>{
+      const br=D("bills/"+id),b=(await t.get(br)).data();
+      if(!b)throw new Error("Bill not found.");
+      if(b.cancelled)throw new Error("Already cancelled.");
+      if(paidOf(b)>0)throw new Error("Reverse the payments on this bill before cancelling it.");
+      const cids=[...new Set((b.fromLines||[]).map(x=>x.cid))];
+      const snaps=[];
+      for(const cid of cids)snaps.push(await t.get(D("challans/"+cid)));   // all reads before any write
+      const writes=[];
+      snaps.forEach((s,k)=>{
+        const d=s.data(),lines=d.lines.map(l=>({...l}));
+        (b.fromLines||[]).filter(x=>x.cid===cids[k]).forEach(x=>{
+          const l=lines[x.li];
+          if(!l||(l.billed||0)<x.q)throw new Error(`Cannot restore ${x.q} on ${d.no}: billed quantity is lower than this bill.`);
+          l.billed=rnd(l.billed-x.q);
+        });
+        writes.push([cids[k],{lines,log:[...(d.log||[]),{t:"Bill "+b.no+" cancelled; billed qty restored",by:me.name,at:Date.now()}]}]);
+      });
+      writes.forEach(([cid,data])=>t.update(D("challans/"+cid),data));
+      t.update(br,{cancelled:true,status:"cancelled",log:[...(b.log||[]),{t:"Cancelled",by:me.name,at:Date.now()}]});
+      t.set(O("audit").doc(),auditRec("Cancelled","Bill",b.no,"billed qty restored on "+cids.length+" challan(s)"));
+    });
+    await loadAll();say("Bill cancelled and billed quantities restored.");
+  }catch(e){err(e)}
+};
+const payBlock=k=>[k.upi?`UPI: ${esc(k.upi)}`:"",k.bank?`Bank: ${esc(k.bank)}`:"",k.acct?`A/c: ${esc(k.acct)}`:"",k.ifsc?`IFSC: ${esc(k.ifsc)}`:""].filter(Boolean).join("<br>")||`<span class="mut">Add UPI and bank details under Company & plan.</span>`;
+function billsView(){
+  if(viewingBill){const b=bills.find(x=>x.id===viewingBill);if(b)return billDetail(b);viewingBill=null}
+  const form=canBill()?(bd?billDraftView():`<div class="card"><div class="row" style="margin:0"><button class="b" onclick="bd=bdNew();draw()">+ New bill from challan</button></div></div>`):"";
+  return form+`<div class="card"><h2>Bills (${bills.length})</h2><div class="tw"><table><tr><th>Bill no.</th><th>Date</th><th>Party</th><th>Challan</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr>
+  ${bills.map(b=>`<tr style="cursor:pointer" onclick="viewingBill='${b.id}';draw()"><td><b>${esc(b.no)}</b></td><td>${dfmt(b.date)}</td><td>${esc(b.party)}</td><td>${esc((b.challanNos||[]).join(", "))}</td><td>${fmt(b.total)}</td><td>${fmt(paidOf(b))}</td><td>${fmt(balanceOf(b))}</td><td>${billBadge(b)}</td></tr>`).join("")||`<tr><td colspan="8">No bills yet. Create one from a challan.</td></tr>`}</table></div></div>`;
+}
+function billDetail(b){
+  const k=company,live=!b.cancelled,bal=balanceOf(b);
+  const canPay=live&&canBill()&&bal>0.004,canCancel=live&&canEdit()&&!(b.payments||[]).length,canRev=live&&canEdit();
+  return `<div class="row noprint" style="margin:0 0 10px"><button class="b s" onclick="viewingBill=null;draw()">← All bills</button><button class="b" onclick="window.print()">Print invoice</button>
+  ${canCancel?`<button class="b d" onclick="cancelBill('${b.id}')">Cancel bill</button>`:""}</div>
+  <div class="card sheet">
+  <div class="top"><div><h2 style="margin:0">${esc(k.name||"Your company")}</h2><div class="mut">${esc(k.addr)}${k.phone?" · "+esc(k.phone):""}${k.gstin?"<br>GSTIN: "+esc(k.gstin):""}</div></div>
+  <div style="text-align:right"><h2 style="margin:0">TAX INVOICE</h2><b>${esc(b.no)}</b><br>Date: ${dfmt(b.date)}<br>${billBadge(b)}</div></div>
+  <div class="two"><div><label>Bill to</label><b>${esc(b.party)}</b><br>${esc(b.addr)}${b.phone?"<br>Ph: "+esc(b.phone):""}${b.gstin?"<br>GSTIN: "+esc(b.gstin):""}<br><span class="mut">Challan: ${esc((b.challanNos||[]).join(", "))}</span></div>
+  <div><label>Payment details</label>${payBlock(k)}</div></div>
+  <div class="tw"><table class="pr"><tr><th>#</th><th>Description</th><th>HSN</th><th>Qty</th><th>Rate</th><th>Taxable</th><th>GST%</th>${b.inter?"<th>IGST</th>":"<th>CGST</th><th>SGST</th>"}<th>Amount</th></tr>
+  ${b.lines.map((l,i)=>`<tr><td>${i+1}</td><td style="white-space:normal">${esc(l.code+" – "+l.name)}</td><td>${esc(l.hsn)}</td><td>${l.qty} ${esc(l.unit)}</td><td>${fmt(l.rate)}</td><td>${fmt(l.taxable)}</td><td>${l.gst}</td>${b.inter?`<td>${fmt(l.igst)}</td>`:`<td>${fmt(l.cgst)}</td><td>${fmt(l.sgst)}</td>`}<td>${fmt(l.amount)}</td></tr>`).join("")}</table></div>
+  <div class="row" style="justify-content:flex-end"><table style="max-width:320px"><tr><td>Taxable</td><td>${fmt(b.taxable)}</td></tr>${b.inter?`<tr><td>IGST</td><td>${fmt(b.igst)}</td></tr>`:`<tr><td>CGST</td><td>${fmt(b.cgst)}</td></tr><tr><td>SGST</td><td>${fmt(b.sgst)}</td></tr>`}<tr><td>Round off</td><td>${fmt(b.roundOff)}</td></tr><tr><td><b>Total</b></td><td><b>${fmt(b.total)}</b></td></tr></table></div>
+  <div class="tw"><table class="pr"><tr><th>#</th><th>Date</th><th>Mode</th><th>Reference</th><th>Amount</th>${canRev?"<th class='noprint'></th>":""}</tr>
+  ${(b.payments||[]).map((p,i)=>`<tr><td>${i+1}</td><td>${dfmt(p.date)}</td><td>${esc(p.mode)}</td><td>${esc(p.ref)}</td><td>${fmt(p.amount)}</td>${canRev?`<td class="noprint"><button class="b d" onclick="reversePay('${b.id}',${i})">Reverse</button></td>`:""}</tr>`).join("")||`<tr><td colspan="${canRev?6:5}">No payments yet.</td></tr>`}
+  <tr><td colspan="4"><b>Balance due</b></td><td><b>${fmt(bal)}</b></td>${canRev?"<td></td>":""}</tr></table></div>
+  <div class="sign"><div>Prepared by<br>${esc(b.createdBy)}</div><div></div><div>Authorised signatory</div></div></div>
+  ${canPay?`<div class="card noprint"><h2>Record payment</h2><div class="g">
+  <div><label>Mode</label><select id="pm_${b.id}">${PAYMODES.map(m=>`<option>${m}</option>`).join("")}</select></div>
+  <div><label>Amount (balance ${fmt(bal)})</label><input id="pa_${b.id}" type="number" min="0" step="0.01"></div>
+  <div><label>UPI txn id / UTR / cheque no.</label><input id="pr_${b.id}"></div>
+  <div><label>Date</label><input id="pd_${b.id}" type="date" value="${today()}"></div></div>
+  <div class="row"><button class="b" onclick="addPay('${b.id}')">Record payment</button></div></div>`:""}
+  <div class="card noprint"><h2>Activity</h2><div class="tw"><table><tr><th>When</th><th>By</th><th>What</th></tr>
+  ${(b.log||[]).slice().reverse().map(e=>`<tr><td>${new Date(e.at).toLocaleString()}</td><td>${esc(e.by)}</td><td style="white-space:normal">${esc(e.t)}</td></tr>`).join("")}</table></div></div>`;
+}
+
+/*PURE-BEGIN*/
+/* ---------- EXCEPTIONS: pure rules (tested in tests/) ---------- */
+const approverProblem=(role,approverUid,meUid)=>{
+  if(approverUid===meUid)return "You cannot approve your own exception. Ask another manager or admin.";
+  if(!["admin","manager"].includes(role))return "Only an admin or a warehouse manager can approve exceptions.";
+  return null;
+};
+const exceptionRecord=(type,reason,meU,ap,at)=>({type:String(type||"Exception"),reason:String(reason||"").trim().slice(0,300),by:meU.name,byUid:meU.uid,approver:ap.approver,approverUid:ap.approverUid,approverRole:ap.approverRole,at});
+// Direct bill (no challan): every line is typed in. Lines with no quantity are skipped.
+function directLinesFor(rows,itemsMap,inter){
+  const out=[];
+  rows.forEach(r=>{
+    const q=Number(r.qty)||0;if(q<=0)return;
+    const it=itemsMap[r.code];if(!it)throw new Error("Choose an item for each line that has a quantity.");
+    const rate=money(r.rate);if(rate<0)throw new Error(`${it.name}: rate cannot be negative.`);
+    out.push(billRow(it,r.code,q,money(q*rate),inter,null,rate));
+  });
+  if(!out.length)throw new Error("Add at least one line with a quantity.");
+  return out;
+}
+// Goods receipt against a purchase order. Quantity above what is still due is an "over" that needs an exception.
+function receiveCalc(lines,qtys){
+  const rec=[],over=[],out=lines.map(l=>({...l}));
+  lines.forEach((l,i)=>{
+    const q=Number(qtys[i])||0;if(q<=0)return;
+    const room=Math.max(0,rnd((l.ordered||0)-(l.received||0)));
+    const normal=Math.min(q,room),extra=rnd(q-normal);
+    out[i].received=rnd((l.received||0)+q);
+    rec.push({li:i,q,normal:rnd(normal),over:extra});
+    if(extra>0)over.push({li:i,name:l.name,over:extra});
+  });
+  if(!rec.length)throw new Error("Enter a quantity to receive.");
+  const status=out.every(l=>(l.received||0)>=(l.ordered||0))?"received":"partial";
+  return {lines:out,rec,over,status};
+}
+/* ---------- REPORT CALCULATIONS (pure) ---------- */
+const inRange=(d,from,to)=>(!from||(d||"")>=from)&&(!to||(d||"")<=to);
+const sumOf=(arr,fn)=>money(arr.reduce((a,x)=>a+(Number(fn(x))||0),0));
+function salesSummary(bs,from,to){
+  const rows=bs.filter(b=>!b.cancelled&&inRange(b.date,from,to));
+  return {count:rows.length,taxable:sumOf(rows,b=>b.taxable),tax:sumOf(rows,b=>b.tax),total:sumOf(rows,b=>b.total),paid:sumOf(rows,paidOf),balance:sumOf(rows,balanceOf)};
+}
+function receivables(bs){
+  const m={};
+  bs.filter(b=>!b.cancelled).forEach(b=>{const r=m[b.party]||(m[b.party]={party:b.party,billed:0,paid:0,balance:0});r.billed=money(r.billed+(b.total||0));r.paid=money(r.paid+paidOf(b));r.balance=money(r.balance+balanceOf(b))});
+  return Object.values(m).filter(r=>r.balance>0.004).sort((a,b)=>b.balance-a.balance);
+}
+// Same rule as the app's stock balances: available = in + return - out - damage. Can be negative after an exception.
+function stockAvail(rows){
+  const m={};
+  rows.forEach(s=>{const k=s.wh+"|"+s.item,o=m[k]||(m[k]={wh:s.wh,item:s.item,in:0,out:0,return:0,damage:0});o[s.type]=rnd((o[s.type]||0)+(Number(s.qty)||0))});
+  return Object.values(m).map(o=>({...o,avail:rnd((o.in||0)+(o.return||0)-(o.out||0)-(o.damage||0))}));
+}
+function stockValueRows(rows,itemMap,whMap){
+  return stockAvail(rows).filter(r=>r.avail!==0).map(r=>{const it=itemMap[r.item]||{},rate=it.rate||0;return {wh:(whMap[r.wh]||{}).name||r.wh,item:it.code||r.item,name:it.name||r.item,qty:r.avail,rate,value:money(r.avail*rate)}})
+    .sort((a,b)=>a.wh.localeCompare(b.wh)||a.item.localeCompare(b.item));
+}
+function pendingChallanRows(cs){
+  return cs.filter(c=>c.status!=="cancelled").map(c=>({no:c.no,date:c.date,party:c.party,pending:rnd(c.lines.reduce((a,l)=>a+Math.max(0,pend(l)),0))})).filter(r=>r.pending>0);
+}
+function exceptionRows(bs,cs,st,ps){
+  const rows=[],add=(kind,ref,date,e)=>rows.push({kind,ref,date,type:e.type,reason:e.reason,by:e.by,approver:e.approver,at:e.at});
+  bs.forEach(b=>b.exception&&add("Bill",b.no,b.date,b.exception));
+  cs.forEach(c=>c.exception&&add("Challan",c.no,c.date,c.exception));
+  st.forEach(s=>s.exception&&add("Stock",s.ref||"",s.at?new Date(s.at).toISOString().slice(0,10):"",s.exception));
+  ps.forEach(p=>p.exception&&add("Purchase",p.no,p.date,p.exception));
+  return rows.sort((a,b)=>(b.at||0)-(a.at||0));
+}
+function purchaseSummary(ps,from,to){
+  const rows=ps.filter(p=>p.status!=="cancelled"&&inRange(p.date,from,to));
+  return {count:rows.length,ordered:sumOf(rows,p=>p.lines.reduce((a,l)=>a+(l.ordered||0)*(l.rate||0),0)),received:sumOf(rows,p=>p.lines.reduce((a,l)=>a+(l.received||0)*(l.rate||0),0))};
+}
+/* ---------- CSV (spreadsheet-safe) ---------- */
+const csvCell=v=>{
+  if(typeof v==="number")return String(v);
+  let s=String(v??"");
+  if(/^[=+\-@\t\r]/.test(s))s="'"+s;           // stops spreadsheet formula injection
+  return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;
+};
+const toCSV=(head,rows)=>[head,...rows].map(r=>r.map(csvCell).join(",")).join("\r\n");
+/*PURE-END*/
+
+/* ---------- EXCEPTION APPROVAL (popup, approver signs in with their own account) ---------- */
+async function verifyApprover(email,pw){
+  if(!email||!pw)throw new Error("Enter the approver's email and password.");
+  let app=null;
+  try{
+    app=firebase.initializeApp(CFG,"appr"+Date.now());
+    let cred;
+    try{cred=await app.auth().signInWithEmailAndPassword(email,pw)}
+    catch(e){throw new Error("Email or password is not correct.")}
+    const uid=cred.user.uid;
+    const r=await db.doc("orgs/"+orgId+"/users/"+uid).get();
+    if(!r.exists)throw new Error("That person is not a member of this organisation.");
+    const u=r.data(),prob=approverProblem(u.role,uid,me.uid);
+    if(prob)throw new Error(prob);
+    return {approverUid:uid,approver:u.name||email,approverRole:u.role};
+  }finally{
+    if(app){try{await app.auth().signOut()}catch(_){}try{await app.delete()}catch(_){}}
+  }
+}
+function askException(type,detail){
+  return new Promise(resolve=>{
+    const wrap=document.createElement("div");wrap.className="modal";
+    wrap.innerHTML=`<div class="mbox" role="dialog" aria-modal="true">
+      <h2>Exception needs approval</h2>
+      <p><b>${esc(type)}</b></p><p class="mut" style="white-space:normal">${esc(detail)}</p>
+      <p class="mut">A manager or admin must confirm this with their own sign-in. It is recorded on the document and in the audit log.</p>
+      <div class="g"><div><label>Approver email</label><input id="axe" type="email" autocomplete="off"></div>
+      <div><label>Approver password</label><input id="axp" type="password" autocomplete="new-password"></div></div>
+      <label style="margin-top:8px">Reason (required)</label><input id="axr">
+      <div class="msg e" id="axm" style="display:none"></div>
+      <div class="row"><button class="b" id="axok">Approve and continue</button><button class="b s" id="axno">Cancel</button></div></div>`;
+    document.body.appendChild(wrap);
+    const done=v=>{wrap.remove();resolve(v)};
+    wrap.querySelector("#axno").onclick=()=>done(null);
+    const okBtn=wrap.querySelector("#axok"),msg=wrap.querySelector("#axm");
+    const fail=m=>{msg.textContent=m;msg.style.display="block";okBtn.disabled=false};
+    okBtn.onclick=async()=>{
+      const reason=wrap.querySelector("#axr").value.trim();
+      if(!reason)return fail("Enter the reason for the exception.");
+      okBtn.disabled=true;msg.style.display="none";
+      try{const ap=await verifyApprover(wrap.querySelector("#axe").value.trim(),wrap.querySelector("#axp").value);done(exceptionRecord(type,reason,me,ap,Date.now()))}
+      catch(e){fail(e.message)}
+    };
+    wrap.querySelector("#axr").focus();
+  });
+}
+
+/* ================= PURCHASE (orders and goods receipts) ================= */
+let purchases=[],pu=null,viewingPO=null;
+const poBadge=p=>{const m={open:["Open","w"],partial:["Part received","w"],received:["Received","ok"],cancelled:["Cancelled","x"]}[p.status]||["?","x"];return `<span class="badge ${m[1]}">${m[0]}</span>`};
+function puNew(){return {supplier:"",gstin:"",addr:"",phone:"",wh:"",date:today(),lines:[{code:"",qty:"",rate:""}]}}
+function puSync(){
+  if(!pu||!$("#psup"))return;
+  pu.supplier=gv("psup");pu.gstin=gv("pgst");pu.addr=gv("paddr");pu.phone=gv("pph");pu.wh=gv("pwh");pu.date=gv("pdate")||today();
+  pu.lines=pu.lines.map((_,i)=>({code:gv("pi"+i),qty:gv("pq"+i),rate:gv("pr"+i)}));
+}
+window.puAdd=()=>{puSync();pu.lines.push({code:"",qty:"",rate:""});draw()};
+window.puDel=i=>{puSync();pu.lines.splice(i,1);if(!pu.lines.length)pu.lines.push({code:"",qty:"",rate:""});draw()};
+window.puPick=i=>{puSync();const l=pu.lines[i],it=itemsById()[l.code];if(it&&(l.rate===""||l.rate===undefined))l.rate=it.rate||"";draw()};
+function poLinesFor(rows,itemMap){
+  const out=rows.filter(r=>(Number(r.qty)||0)>0||r.code).map(r=>{
+    const it=itemMap[r.code];if(!it)throw new Error("Choose an item for each line.");
+    const q=Number(r.qty)||0;if(!(q>0))throw new Error(`${it.name}: enter a quantity above zero.`);
+    const rate=money(r.rate);if(rate<0)throw new Error(`${it.name}: rate cannot be negative.`);
+    return {code:r.code,name:it.name,hsn:it.hsn||"",unit:it.unit||"pcs",gst:Number(it.gst)||0,ordered:rnd(q),received:0,rate};
+  });
+  if(!out.length)throw new Error("Add at least one line.");
+  return out;
+}
+window.savePO=async()=>{
+  puSync();
+  const supplier=(pu.supplier||"").trim();
+  if(!supplier)return say("Enter the supplier name.",true);
+  if(!pu.wh)return say("Choose the receiving warehouse.",true);
+  let lines;try{lines=poLinesFor(pu.lines,itemsById())}catch(e){return err(e)}
+  const ref=O("purchases").doc(),kref=D("counters/purchase"),at=Date.now();
+  let no;
+  try{
+    await db.runTransaction(async t=>{
+      const k=await t.get(kref),n=((k.exists&&k.data().purchase)||0)+1;
+      no="PO-"+String(n).padStart(4,"0");
+      t.set(kref,{purchase:n},{merge:true});
+      t.set(ref,{no,date:pu.date||today(),supplier,gstin:(pu.gstin||"").trim(),addr:(pu.addr||"").trim(),phone:(pu.phone||"").trim(),wh:pu.wh,whName:wName(pu.wh),lines,status:"open",exception:null,createdBy:me.name,createdUid:me.uid,at,log:[{t:"Order placed",by:me.name,at}]});
+      t.set(O("audit").doc(),auditRec("Created","Purchase order",no,supplier+" · "+lines.length+" lines"));
+    });
+    pu=null;viewingPO=ref.id;await loadAll();say(`Purchase order ${no} saved.`);
+  }catch(e){err(e)}
+};
+window.receivePO=async id=>{
+  const p=purchases.find(x=>x.id===id);if(!p)return;
+  const qtys=p.lines.map((_,i)=>gv("rq"+i));
+  let calc;try{calc=receiveCalc(p.lines,qtys)}catch(e){return err(e)}
+  let ex=null;
+  if(calc.over.length){
+    ex=await askException("Receive more than ordered",calc.over.map(o=>`${o.name}: ${o.over} over the order`).join("; "));
+    if(!ex)return;
+  }
+  try{
+    await db.runTransaction(async t=>{
+      const r=D("purchases/"+id),d=(await t.get(r)).data();
+      if(!d)throw new Error("Order not found.");
+      if(d.status==="cancelled")throw new Error("This order is cancelled.");
+      const c2=receiveCalc(d.lines,qtys);
+      if(c2.over.length&&!ex)throw new Error("Quantities changed while you were editing. Review and try again.");
+      const summary=c2.rec.map(x=>`${d.lines[x.li].name} ×${x.q}`).join(", ");
+      c2.rec.forEach(x=>{
+        const code=d.lines[x.li].code;
+        if(x.normal>0)t.set(O("stock").doc(),stockDoc(d.wh,code,"in",x.normal,d.no,id,null));
+        if(x.over>0)t.set(O("stock").doc(),stockDoc(d.wh,code,"in",x.over,d.no,id,ex));
+      });
+      t.update(r,{lines:c2.lines,status:c2.status,exception:ex||d.exception||null,log:[...(d.log||[]),{t:"Received: "+summary+(ex?" · EXCEPTION: "+ex.reason:""),by:me.name,at:Date.now()}]});
+      t.set(O("audit").doc(),auditRec(ex?"Exception receipt":"Received","Purchase order",d.no,summary+(ex?" · "+ex.type+": "+ex.reason:"")));
+    });
+    await loadAll();say("Goods received into stock.");
+  }catch(e){err(e)}
+};
+window.cancelPO=async id=>{
+  if(!confirm("Cancel this purchase order?"))return;
+  try{
+    await db.runTransaction(async t=>{
+      const r=D("purchases/"+id),d=(await t.get(r)).data();
+      if(!d)throw new Error("Order not found.");
+      if(d.status==="cancelled")throw new Error("Already cancelled.");
+      if(d.lines.some(l=>(l.received||0)>0))throw new Error("Goods are already received against this order, so it cannot be cancelled.");
+      t.update(r,{status:"cancelled",log:[...(d.log||[]),{t:"Cancelled",by:me.name,at:Date.now()}]});
+      t.set(O("audit").doc(),auditRec("Cancelled","Purchase order",d.no,""));
+    });
+    await loadAll();say("Order cancelled.");
+  }catch(e){err(e)}
+};
+function poFormView(){
+  const ws=whs,items=Object.values(itemsById()).sort((a,b)=>a.code.localeCompare(b.code));
+  return `<div class="card"><h2>New purchase order</h2><div class="g">
+  <div><label>Supplier</label><input id="psup" value="${esc(pu.supplier)}"></div>
+  <div><label>Supplier GSTIN</label><input id="pgst" value="${esc(pu.gstin)}"></div>
+  <div><label>Supplier phone</label><input id="pph" value="${esc(pu.phone)}"></div>
+  <div><label>Deliver to warehouse</label><select id="pwh"><option value="">Choose…</option>${ws.map(w=>`<option value="${esc(w.id)}" ${w.id===pu.wh?"selected":""}>${esc(w.name)}</option>`).join("")}</select></div>
+  <div><label>Order date</label><input id="pdate" type="date" value="${esc(pu.date)}"></div></div>
+  <div style="margin-top:8px"><label>Supplier address</label><input id="paddr" value="${esc(pu.addr)}"></div>
+  <div class="tw" style="margin-top:8px"><table><tr><th>Item</th><th>Qty</th><th>Rate</th><th></th></tr>
+  ${pu.lines.map((l,i)=>`<tr><td><select id="pi${i}" onchange="puPick(${i})"><option value="">Choose item…</option>${items.map(it=>`<option value="${esc(it.id)}" ${it.id===l.code?"selected":""}>${esc(it.code+" – "+it.name)}</option>`).join("")}</select></td>
+  <td><input id="pq${i}" type="number" min="0" step="any" value="${esc(l.qty)}" style="width:90px"></td>
+  <td><input id="pr${i}" type="number" min="0" step="0.01" value="${esc(l.rate)}" style="width:110px"></td>
+  <td><button class="b d" onclick="puDel(${i})">Remove</button></td></tr>`).join("")}</table></div>
+  <div class="row"><button class="b s" onclick="puAdd()">+ Add line</button><button class="b" onclick="savePO()">Save order</button><button class="b s" onclick="pu=null;draw()">Discard</button></div></div>`;
+}
+function purchasesView(){
+  if(viewingPO){const p=purchases.find(x=>x.id===viewingPO);if(p)return poDetail(p);viewingPO=null}
+  const form=canCreateCh()?(pu?poFormView():`<div class="card"><div class="row" style="margin:0"><button class="b" onclick="pu=puNew();draw()">+ New purchase order</button></div></div>`):"";
+  return form+`<div class="card"><h2>Purchase orders (${purchases.length})</h2><div class="tw"><table><tr><th>PO no.</th><th>Date</th><th>Supplier</th><th>Warehouse</th><th>Ordered</th><th>Received</th><th>Status</th></tr>
+  ${purchases.map(p=>{const o=p.lines.reduce((a,l)=>a+(l.ordered||0),0),r=p.lines.reduce((a,l)=>a+(l.received||0),0);return `<tr style="cursor:pointer" onclick="viewingPO='${esc(p.id)}';draw()"><td><b>${esc(p.no)}</b></td><td>${dfmt(p.date)}</td><td>${esc(p.supplier)}</td><td>${esc(p.whName)}</td><td>${rnd(o)}</td><td>${rnd(r)}</td><td>${poBadge(p)}</td></tr>`}).join("")||`<tr><td colspan="7">No purchase orders yet.</td></tr>`}</table></div></div>`;
+}
+function poDetail(p){
+  const open=p.status!=="cancelled"&&p.status!=="received";
+  const anyRecv=p.lines.some(l=>(l.received||0)>0);
+  return `<div class="row noprint" style="margin:0 0 10px"><button class="b s" onclick="viewingPO=null;draw()">← All orders</button><button class="b" onclick="window.print()">Print</button>
+  ${canEdit()&&p.status!=="cancelled"&&!anyRecv?`<button class="b d" onclick="cancelPO('${esc(p.id)}')">Cancel order</button>`:""}</div>
+  <div class="card sheet"><div class="top"><div><h2 style="margin:0">Purchase order ${esc(p.no)}</h2><div class="mut">Supplier: <b>${esc(p.supplier)}</b>${p.gstin?"<br>GSTIN: "+esc(p.gstin):""}${p.addr?"<br>"+esc(p.addr):""}${p.phone?"<br>Ph: "+esc(p.phone):""}</div></div>
+  <div style="text-align:right">${poBadge(p)}<br>Date: ${dfmt(p.date)}<br>Deliver to: <b>${esc(p.whName)}</b></div></div>
+  <div class="tw"><table class="pr"><tr><th>#</th><th>Item</th><th>HSN</th><th>Ordered</th><th>Received</th><th>Pending</th><th>Rate</th><th>Value</th></tr>
+  ${p.lines.map((l,i)=>`<tr><td>${i+1}</td><td style="white-space:normal">${esc(l.code+" – "+l.name)}</td><td>${esc(l.hsn)}</td><td>${l.ordered} ${esc(l.unit)}</td><td>${l.received||0}</td><td>${rnd((l.ordered||0)-(l.received||0))}</td><td>${fmt(l.rate)}</td><td>${fmt((l.ordered||0)*(l.rate||0))}</td></tr>`).join("")}</table></div></div>
+  ${open&&canCreateCh()?`<div class="card noprint"><h2>Receive goods into ${esc(p.whName)}</h2><p class="mut">Quantities above what is still due need an exception approved by a manager or admin.</p>
+  <div class="tw"><table><tr><th>Item</th><th>Pending</th><th>Receive now</th></tr>
+  ${p.lines.map((l,i)=>`<tr><td>${esc(l.name)}</td><td>${rnd((l.ordered||0)-(l.received||0))}</td><td><input id="rq${i}" type="number" min="0" step="any" value="${Math.max(0,rnd((l.ordered||0)-(l.received||0)))}" style="width:100px"></td></tr>`).join("")}</table></div>
+  <div class="row"><button class="b" onclick="receivePO('${esc(p.id)}')">Receive into stock</button></div></div>`:""}
+  <div class="card noprint"><h2>Activity</h2><div class="tw"><table><tr><th>When</th><th>By</th><th>What</th></tr>
+  ${(p.log||[]).slice().reverse().map(e=>`<tr><td>${new Date(e.at).toLocaleString()}</td><td>${esc(e.by)}</td><td style="white-space:normal">${esc(e.t)}</td></tr>`).join("")}</table></div></div>`;
+}
+
+/* ================= REPORTS (managers and admins) ================= */
+let rep={from:"",to:""};
+function repData(){
+  const from=rep.from||today().slice(0,8)+"01",to=rep.to||today();
+  const itemMap=itemsById(),whMap=Object.fromEntries(whs.map(w=>[w.id,w]));
+  return {from,to,sales:salesSummary(bills,from,to),recv:receivables(bills),stockRows:stockValueRows(stock,itemMap,whMap),
+    pend:pendingChallanRows(challans),exc:exceptionRows(bills,challans,stock,purchases),purch:purchaseSummary(purchases,from,to)};
+}
+window.repApply=()=>{rep={from:gv("rf"),to:gv("rt")};draw()};
+window.exportRep=k=>{
+  const d=repData();
+  const m={
+    sales:["sales-summary.csv",["Bills","Taxable","Tax","Total","Paid","Balance"],[[d.sales.count,d.sales.taxable,d.sales.tax,d.sales.total,d.sales.paid,d.sales.balance]]],
+    recv:["receivables.csv",["Party","Billed","Paid","Balance"],d.recv.map(r=>[r.party,r.billed,r.paid,r.balance])],
+    stock:["stock-value.csv",["Warehouse","Item code","Item","Qty","Rate","Value"],d.stockRows.map(r=>[r.wh,r.item,r.name,r.qty,r.rate,r.value])],
+    pend:["pending-challans.csv",["Challan","Date","Party","Pending qty"],d.pend.map(r=>[r.no,r.date,r.party,r.pending])],
+    exc:["exceptions.csv",["Kind","Ref","Date","Type","Reason","By","Approver","At"],d.exc.map(r=>[r.kind,r.ref,r.date,r.type,r.reason,r.by,r.approver,r.at?new Date(r.at).toLocaleString():""])],
+    purch:["purchases.csv",["Orders","Ordered value","Received value"],[[d.purch.count,d.purch.ordered,d.purch.received]]]
+  };
+  const [name,head,rows]=m[k];
+  const blob=new Blob([toCSV(head,rows)],{type:"text/csv"}),a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
+};
+function reportsView(){
+  const d=repData(),sec=(title,key,body)=>`<div class="card"><div class="row" style="margin:0 0 8px;justify-content:space-between"><h2 style="margin:0">${title}</h2><button class="b s" onclick="exportRep('${key}')">Download CSV</button></div>${body}</div>`;
+  const tbl=(head,rows)=>`<div class="tw"><table><tr>${head.map(h=>`<th>${h}</th>`).join("")}</tr>${rows.join("")||`<tr><td colspan="${head.length}">Nothing to show.</td></tr>`}</table></div>`;
+  let out=`<div class="card"><h2>Period</h2><div class="g"><div><label>From</label><input id="rf" type="date" value="${esc(d.from)}"></div><div><label>To</label><input id="rt" type="date" value="${esc(d.to)}"></div></div><div class="row"><button class="b" onclick="repApply()">Apply</button></div></div>`;
+  if(has("billing")){
+    out+=sec("Sales (bills in period)","sales",tbl(["Bills","Taxable","Tax","Total","Paid","Balance"],[`<tr><td>${d.sales.count}</td><td>${fmt(d.sales.taxable)}</td><td>${fmt(d.sales.tax)}</td><td>${fmt(d.sales.total)}</td><td>${fmt(d.sales.paid)}</td><td>${fmt(d.sales.balance)}</td></tr>`]));
+    out+=sec("Receivables (who owes you)","recv",tbl(["Party","Billed","Paid","Balance"],d.recv.map(r=>`<tr><td>${esc(r.party)}</td><td>${fmt(r.billed)}</td><td>${fmt(r.paid)}</td><td>${fmt(r.balance)}</td></tr>`)));
+  }
+  if(has("inventory")){
+    out+=sec("Stock value","stock",tbl(["Warehouse","Item","Qty","Rate","Value"],d.stockRows.map(r=>`<tr><td>${esc(r.wh)}</td><td>${esc(r.item+" – "+r.name)}</td><td>${r.qty}</td><td>${fmt(r.rate)}</td><td>${fmt(r.value)}</td></tr>`)));
+  }
+  if(has("sales")){
+    out+=sec("Challans with quantity still to bill","pend",tbl(["Challan","Date","Party","Pending qty"],d.pend.map(r=>`<tr><td>${esc(r.no)}</td><td>${dfmt(r.date)}</td><td>${esc(r.party)}</td><td>${r.pending}</td></tr>`)));
+  }
+  if(has("purchase")){
+    out+=sec("Purchases in period","purch",tbl(["Orders","Ordered value","Received value"],[`<tr><td>${d.purch.count}</td><td>${fmt(d.purch.ordered)}</td><td>${fmt(d.purch.received)}</td></tr>`]));
+  }
+  out+=sec("Exceptions (all approvals, newest first)","exc",tbl(["When","Kind","Ref","Type","Reason","By","Approved by"],d.exc.map(r=>`<tr><td>${r.at?new Date(r.at).toLocaleString():""}</td><td>${esc(r.kind)}</td><td>${esc(r.ref)}</td><td>${esc(r.type)}</td><td style="white-space:normal">${esc(r.reason)}</td><td>${esc(r.by)}</td><td>${esc(r.approver)}</td></tr>`)));
+  return out;
+}
+
+/* ---------- AUDIT LOG VIEW (organisation admins) ---------- */
+let auditRows=[],auditFilter={entity:"",who:""};
+window.loadAudit=async()=>{
+  try{const s=await O("audit").orderBy("at","desc").limit(300).get();auditRows=s.docs.map(d=>({id:d.id,...d.data()}))}
+  catch(e){auditRows=[];err(e)}
+};
+function auditView(){
+  const ents=[...new Set(auditRows.map(r=>r.entity))].sort(), who=[...new Set(auditRows.map(r=>r.by))].sort();
+  const rows=auditRows.filter(r=>(!auditFilter.entity||r.entity===auditFilter.entity)&&(!auditFilter.who||r.by===auditFilter.who));
+  return `<div class="card"><h2>Audit log</h2><p class="mut">Who changed what, newest first (latest 300). Entries cannot be edited or deleted from the app.</p>
+  <div class="g"><div><label>Entity</label><select onchange="auditFilter.entity=this.value;draw()"><option value="">All</option>${ents.map(e=>`<option ${e===auditFilter.entity?"selected":""}>${esc(e)}</option>`).join("")}</select></div>
+  <div><label>Person</label><select onchange="auditFilter.who=this.value;draw()"><option value="">All</option>${who.map(w=>`<option ${w===auditFilter.who?"selected":""}>${esc(w)}</option>`).join("")}</select></div></div>
+  <div class="row"><button class="b s" onclick="loadAudit().then(draw)">Refresh</button></div>
+  <div class="tw"><table><tr><th>When</th><th>Who</th><th>Action</th><th>Entity</th><th>Ref</th><th>Detail</th></tr>
+  ${rows.map(r=>`<tr><td>${new Date(r.at).toLocaleString()}</td><td>${esc(r.by)}</td><td>${esc(r.action)}</td><td>${esc(r.entity)}</td><td>${esc(r.ref)}</td><td style="white-space:normal">${esc(r.detail)}</td></tr>`).join("")||`<tr><td colspan="6">No entries yet.</td></tr>`}</table></div></div>`;
+}
 
 /* ---------- COMPANY & PLAN (organisation admin) ---------- */
 const ymd=ms=>{if(!ms)return"";const d=new Date(ms),p=n=>String(n).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())};
@@ -548,12 +1227,13 @@ function companyView(){
   <div><label>Company name</label><input id="kn" value="${esc(k.name)}"></div><div><label>Phone</label><input id="kph" value="${esc(k.phone)}"></div>
   <div><label>GSTIN</label><input id="kg" value="${esc(k.gstin)}"></div></div>
   <div style="margin-top:8px"><label>Address</label><input id="ka" value="${esc(k.addr)}"></div>
+  <div class="g" style="margin-top:8px"><div><label>UPI ID</label><input id="kupi" value="${esc(k.upi)}"></div><div><label>Bank name</label><input id="kbank" value="${esc(k.bank)}"></div><div><label>Account no.</label><input id="kacct" value="${esc(k.acct)}"></div><div><label>IFSC</label><input id="kifsc" value="${esc(k.ifsc)}"></div></div>
   <div class="row"><button class="b" onclick="saveCompany()">Save</button></div></div>
   <div class="card"><h2>Your plan</h2><p class="mut">${org.validUntil?"Valid until "+ymd(org.validUntil):"No expiry date set"}. To add or remove modules, contact your vendor.</p>
   <div class="tw"><table>${Object.entries(MODS).map(([k,m])=>`<tr><td>${m.label}${m.soon?" <span class='mut'>(coming soon)</span>":""}</td><td class="mut" style="white-space:normal">${m.desc}</td><td>${has(k)?"<span class='badge ok'>Active</span>":"<span class='badge'>Not in plan</span>"}</td></tr>`).join("")}</table></div></div>`;
 }
 window.saveCompany=async()=>{
-  try{await D("settings/company").set({name:gv("kn").trim(),phone:gv("kph").trim(),gstin:gv("kg").trim(),addr:gv("ka").trim()});await loadAll();say("Company details saved.")}catch(e){err(e)}
+  try{const nm=gv("kn").trim();await D("settings/company").set({name:nm,phone:gv("kph").trim(),gstin:gv("kg").trim(),addr:gv("ka").trim(),upi:gv("kupi").trim(),bank:gv("kbank").trim(),acct:gv("kacct").trim(),ifsc:gv("kifsc").trim()});await audit("Saved","Company",nm,"company details");await loadAll();say("Company details saved.")}catch(e){err(e)}
 };
 
 /* ---------- PLATFORM CONSOLE (platform owner only) ---------- */
@@ -587,10 +1267,10 @@ window.createOrg=async()=>{
     b.set(ref,{name,active:true,modules,validUntil:0,createdAt:Date.now()});
     b.set(db.doc("orgs/"+ref.id+"/users/"+c.user.uid),{name:an,email:ae,role:"admin"});
     b.set(db.doc("userOrg/"+c.user.uid),{orgId:ref.id});
-    await b.commit();await loadOrgs();say(`${name} created. Give ${ae} the temporary password.`);
+    await b.commit();await auditTo(ref.id,"Created","Organisation",name,"admin "+ae+" · modules: "+Object.keys(modules).filter(k=>modules[k]).join(", "));await loadOrgs();say(`${name} created. Give ${ae} the temporary password.`);
   }catch(e){err(e)}finally{if(sec)sec.delete()}
 };
-const orgUpd=async(id,d,msg)=>{try{await db.doc("orgs/"+id).update(d);await loadOrgs();say(msg)}catch(e){err(e)}};
+const orgUpd=async(id,d,msg)=>{try{await db.doc("orgs/"+id).update(d);await auditTo(id,"Updated","Organisation",(orgsList.find(x=>x.id===id)||{}).name||id,msg);await loadOrgs();say(msg)}catch(e){err(e)}};
 window.toggleMod=(id,k,on)=>{
   const m={...(orgsList.find(x=>x.id===id).modules||{})};
   (on?reqAll(k):depsOf(k)).forEach(x=>m[x]=on);
@@ -614,8 +1294,9 @@ window.migrate=async()=>{
     const us=await db.collection("users").get();n.users=0;
     us.forEach(d=>{if(d.id===me.uid)return;const u=d.data();n.users++;W.push([base("users/"+d.id),{name:u.name||"",email:u.email||"",role:u.role}]);W.push([db.doc("userOrg/"+d.id),{orgId:oid}])});
     for(let i=0;i<W.length;i+=400){const b=db.batch();W.slice(i,i+400).forEach(([r,d])=>b.set(r,d));await b.commit()}
-    say("Imported: "+Object.entries(n).map(([k,v])=>v+" "+k).join(", ")+".");
+    await auditTo(oid,"Imported","Legacy data",oid,"single-company data copied");say("Imported: "+Object.entries(n).map(([k,v])=>v+" "+k).join(", ")+".");
   }catch(e){err(e)}
 };
 
+if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(e=>console.warn("offline app shell unavailable",e)));
 </script></body></html>
