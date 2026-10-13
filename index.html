@@ -7,12 +7,13 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <title>StockBill – Phase 3 (multi-organisation)</title>
 <style>
-:root{--bg:#f3f5f2;--card:#fff;--ink:#1d2a24;--mut:#66756d;--line:#d9e0db;--pri:#14594a;--pri2:#0e4337;--bad:#b3261e;--ok:#1b7a3d}
+:root{--bg:#f3f5f2;--card:#fff;--ink:#1d2a24;--mut:#66756d;--line:#d9e0db;--pri:#14594a;--pri2:#0e4337;--bad:#b3261e;--ok:#1b7a3d;--head:#e6ece8;--recv:#1b7a3d;--pay:#c2410c}
+.recv{color:var(--recv)}.pay{color:var(--pay)}
 *{box-sizing:border-box}
 body{margin:0;font:15px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
 header{background:var(--pri);color:#fff;padding:10px 14px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:5}
 header b{font-size:17px;flex:1}header small{opacity:.85}
-nav{display:flex;gap:4px;padding:8px 10px;overflow-x:auto;background:#e6ece8}
+nav{display:flex;gap:4px;padding:8px 10px;overflow-x:auto;background:var(--head,#e6ece8)}
 nav button{border:0;background:none;padding:8px 14px;border-radius:8px;font:inherit;color:var(--ink);cursor:pointer;white-space:nowrap}
 nav button.on{background:var(--pri);color:#fff}
 main{max-width:980px;margin:0 auto;padding:12px}
@@ -92,7 +93,7 @@ const audit=(action,entity,ref,detail)=>auditTo(orgId,action,entity,ref,detail);
 const isAdmin=()=>me&&me.role==="admin";
 function say(t,e){note=`<div class="msg ${e?"e":""}">${esc(t)}</div>`;if(!e&&!viewing&&!viewingBill&&!viewingPO)clearFm(tab);draw()}
 function err(e){say(e.message||String(e),true)}
-const resetData=()=>{items=[];whs=[];stock=[];products=[];challans=[];company={};users=[];auditRows=[];bills=[];bd=null;viewingBill=null;purchases=[];pu=null;viewingPO=null};
+const resetData=()=>{items=[];whs=[];stock=[];products=[];challans=[];company={};users=[];auditRows=[];bills=[];bd=null;viewingBill=null;purchases=[];pu=null;viewingPO=null;offers=[]};
 
 auth.onAuthStateChanged(async u=>{
   if(busy)return;
@@ -172,6 +173,7 @@ async function loadAll(){
   if(has("warehouse"))P.push((async()=>{const w=await O("warehouses").orderBy("name").get();whs=w.docs.map(d=>({id:d.id,...d.data()}))})());
   if(has("sales"))P.push((async()=>{const c=await O("challans").orderBy("at","desc").limit(300).get();challans=c.docs.map(d=>({id:d.id,...d.data()}))})());
   if(has("billing"))P.push((async()=>{const b=await O("bills").orderBy("at","desc").limit(300).get();bills=b.docs.map(d=>({id:d.id,...d.data()}))})());
+  if(has("billing"))P.push((async()=>{const s=await O("offers").get();offers=s.docs.map(d=>({id:d.id,...d.data()}))})());
   if(has("purchase"))P.push((async()=>{const p=await O("purchases").orderBy("at","desc").limit(300).get();purchases=p.docs.map(d=>({id:d.id,...d.data()}))})());
   P.push((async()=>{const co=await D("settings/company").get();company=co.exists?co.data():{}})());
   if(isAdmin())P.push((async()=>{const u=await O("users").get();users=u.docs.map(d=>({id:d.id,...d.data()}))})());
@@ -180,17 +182,17 @@ async function loadAll(){
 
 function tabsFor(){
   if(!orgId)return [{k:"orgs",l:"Organisations",on:true}];
-  const t=[["items","Items","inventory"],["whs","Warehouses","warehouse"],["stock","Stock","inventory"],["products","Products","inventory"],["challans","Challans","sales"],["bills","Bills","billing"],["purchases","Purchase","purchase"],["reports","Reports","reports"]]
+  const t=[["items","Items","inventory"],["whs","Warehouses","warehouse"],["stock","Stock","inventory"],["products","Products","inventory"],["challans","Challans","sales"],["bills","Bills","billing"],["offers","Offers","billing"],["purchases","Purchase","purchase"],["reports","Reports","reports"]]
     .map(([k,l,m])=>({k,l,on:has(m)&&(k!=="reports"||canEdit())}));
   if(isAdmin())t.push({k:"users",l:"Users",on:true},{k:"audit",l:"Audit log",on:true},{k:"company",l:"Company & plan",on:true});
   return t;
 }
 window.goTab=k=>{tab=k;note="";editing=null;calc=null;viewing=null;viewingBill=null;viewingPO=null;restorePending=true;if(k==="audit"){loadAudit().then(draw);return}draw()};
 function draw(){
-  syncDrafts();
+  syncDrafts();applyLook();
   const ts=tabsFor();
   if(!ts.some(t=>t.k===tab&&t.on))tab=(ts.find(t=>t.on)||{k:""}).k;
-  const views={items:itemsView,whs:whView,stock:stockView,products:productsView,challans:challansView,users:usersView,audit:auditView,bills:billsView,purchases:purchasesView,reports:reportsView,company:companyView,orgs:orgsView};
+  const views={items:itemsView,whs:whView,stock:stockView,products:productsView,challans:challansView,users:usersView,audit:auditView,bills:billsView,offers:offersView,purchases:purchasesView,reports:reportsView,company:companyView,orgs:orgsView};
   $("#app").innerHTML=`<header>${(company||{}).logo?`<img class="clogo" src="${company.logo}" alt="">`:""}<b>${esc((company||{}).name||"StockBill")}</b><small>${org?esc(org.name)+" · ":""}${esc(me.name)} · ${ROLES[me.role]}</small>
   ${me.super&&orgId?`<button class="b s" onclick="leaveOrg()">← Platform</button>`:""}
   <button class="b s" onclick="auth.signOut()">Log out</button></header>
@@ -603,7 +605,7 @@ const stateCode=g=>{const s=String(g||"").trim();return /^\d{2}/.test(s)?s.slice
 const isInterState=(sellerGstin,buyerGstin)=>{const a=stateCode(sellerGstin),b=stateCode(buyerGstin);return !!(a&&b&&a!==b)};
 // Split an amount in proportion to weights. Paise-exact; the rounding remainder goes to the largest weights.
 function splitByRatio(total,weights){
-  const T=toPaise(total),w=weights.map(x=>Math.max(0,Number(x)||0)),W=w.reduce((a,b)=>a+b,0);
+  const T=toPaise(total),w=weights.map(x=>toPaise(Math.max(0,Number(x)||0))),W=w.reduce((a,b)=>a+b,0);
   if(!w.length)return [];
   const base=W>0?w.map(x=>Math.floor(T*x/W)):w.map(()=>Math.floor(T/w.length));
   let rem=T-base.reduce((a,b)=>a+b,0);
@@ -617,16 +619,52 @@ function taxOf(taxable,gst,inter){
   if(inter)return {cgst:0,sgst:0,igst:tr/100};
   const cg=Math.floor(tr/2);return {cgst:cg/100,sgst:(tr-cg)/100,igst:0};
 }
-function billRow(it,code,qty,taxable,inter,from,rate){
+function billRow(it,code,qty,taxable,inter,from,rate,x){
+  x=x||{};
   const gst=Number(it.gst)||0,tx=taxOf(taxable,gst,inter);
-  return {code,name:it.name||code,hsn:it.hsn||"",unit:it.unit||"pcs",qty:rnd(qty),rate:rate!==undefined?rate:(qty?money(taxable/qty):0),
-    taxable:money(taxable),gst,cgst:tx.cgst,sgst:tx.sgst,igst:tx.igst,amount:money(taxable+tx.cgst+tx.sgst+tx.igst),from:from||""};
+  return {code,name:it.name||code,hsn:it.hsn||"",unit:it.unit||"pcs",qty:rnd(qty),
+    rate:rate!==undefined?rate:(qty?money(taxable/qty):0),
+    gross:money(x.gross!==undefined?x.gross:taxable),disc:money(x.disc||0),offer:x.offer||"",
+    taxable:money(taxable),gst,cgst:tx.cgst,sgst:tx.sgst,igst:tx.igst,
+    amount:money(taxable+tx.cgst+tx.sgst+tx.igst),from:from||""};
 }
-// Turn challan selections into bill lines. sel[i] = {qty, rate, amt, comp:[...]} as typed; "" means default.
-// Returns {lines, used} and throws a readable error if a quantity or split is wrong.
+/* ---------- OFFERS AND DISCOUNTS ---------- */
+// Offer targets are "item:CODE" or "prod:CODE". Offers run inside their from/to dates.
+const offerTarget=(kind,code)=>(kind==="product"?"prod:":"item:")+code;
+function offerActive(o,target,date){
+  return !!o&&o.active!==false&&o.target===target&&(!o.from||(date||"")>=o.from)&&(!o.to||(date||"")<=o.to);
+}
+// Discount in rupees for a line. "pct" is a percentage of the line; "flat" is rupees per unit, never more than the line.
+function offerDisc(o,gross,qty){
+  const v=Number(o.value)||0;if(v<=0)return 0;
+  return o.type==="pct"?money(gross*v/100):money(Math.min(v*(qty||0),gross));
+}
+// A manual % typed on the line beats an automatic offer. Otherwise the best active offer for that target wins.
+function lineDisc(gross,qty,target,dpct,date,offers){
+  const p=Number(dpct)||0;
+  if(p>0)return {disc:money(Math.min(gross,gross*p/100)),offer:"Manual "+p+"%"};
+  let best=null;
+  (offers||[]).forEach(o=>{if(!offerActive(o,target,date))return;const d=offerDisc(o,gross,qty);if(d>(best?best.d:0))best={o,d}});
+  return best?{disc:money(Math.min(gross,best.d)),offer:best.o.name||"Offer"}:{disc:0,offer:""};
+}
+// Spread a bill-level discount over the lines (by their value after line discounts), then price each line with GST.
+function finishRows(descs,inter,billDisc){
+  const base=descs.map(d=>money(d.gross-d.disc));
+  const total=money(base.reduce((a,b)=>a+b,0));
+  const bd=billDisc||{},v=Number(bd.value)||0;
+  let extra=0;
+  if(v>0&&total>0)extra=bd.type==="pct"?money(total*v/100):money(Math.min(v,total));
+  const shares=extra>0?splitByRatio(extra,base):base.map(()=>0);
+  return descs.map((d,i)=>{
+    const share=shares[i]||0,disc=money(d.disc+share),taxable=money(d.gross-disc);
+    return billRow(d.it,d.code,d.qty,taxable,inter,d.from,d.rate,{gross:d.gross,disc,offer:d.offer});
+  });
+}
+// Turn challan selections into bill lines. sel[i] = {qty, rate, amt, comp, dpct} as typed; "" means default.
+// opts: over (allow beyond pending), offers, date, billDisc {type,value}. Returns {lines, used}; throws a readable error.
 function billLinesFor(lines,sel,itemsById,inter,opts){
-  const over=!!(opts&&opts.over);
-  const out=[],used=[];
+  const over=!!(opts&&opts.over),offers=(opts&&opts.offers)||[],date=(opts&&opts.date)||"",billDisc=(opts&&opts.billDisc)||null;
+  const descs=[],used=[];
   lines.forEach((l,i)=>{
     const s=sel[i]||{},q=Number(s.qty)||0;
     if(q<=0)return;
@@ -643,29 +681,57 @@ function billLinesFor(lines,sel,itemsById,inter,opts){
       const amounts=fixed.slice();
       if(free.length){const rest=splitByRatio(money(amt-fixedSum),free.map(j=>weights[j]));free.forEach((j,k)=>amounts[j]=rest[k])}
       else if(Math.abs(fixedSum-amt)>0.005)throw new Error(`${l.name}: component amounts add to ${fixedSum}, but the product amount is ${amt}.`);
-      comps.forEach((c,j)=>{const it=itemsById[c.item]||{};out.push(billRow(it,c.item,c.qty*q,amounts[j],inter,l.code+" "+l.name))});
+      const dl=lineDisc(amt,q,offerTarget("product",l.code),s.dpct,date,offers);
+      const dsplit=splitByRatio(dl.disc,amounts);
+      comps.forEach((c,j)=>{
+        const it=itemsById[c.item]||{},cq=rnd(c.qty*q);
+        descs.push({it,code:c.item,qty:cq,gross:amounts[j],disc:dsplit[j]||0,offer:dl.offer,from:l.code+" "+l.name,rate:cq?money(amounts[j]/cq):0});
+      });
     }else{
       const it=itemsById[l.ref]||{};
       const rate=(s.rate!==undefined&&s.rate!=="")?money(s.rate):money(it.rate||0);
-      out.push(billRow(it,l.ref,q,money(q*rate),inter,null,rate));
+      const gross=money(q*rate),dl=lineDisc(gross,q,offerTarget("item",l.ref),s.dpct,date,offers);
+      descs.push({it,code:l.ref,qty:q,gross,disc:dl.disc,offer:dl.offer,from:null,rate});
     }
   });
-  return {lines:out,used};
+  return {lines:finishRows(descs,inter,billDisc),used};
+}
+// Direct bill (no challan): rows are typed in, of kind "item" or "product". Products are priced like challan products.
+function directLinesFor(rows,itemMap,inter,opts){
+  const pmap=Object.fromEntries(((opts&&opts.products)||[]).map(p=>[p.code,p]));
+  const flines=[],sel=[];
+  rows.forEach(r=>{
+    const q=Number(r.qty)||0;if(q<=0)return;
+    if(r.kind==="product"){
+      const p=pmap[r.code];if(!p)throw new Error("Choose a product for each line that has a quantity.");
+      flines.push({kind:"product",code:p.code,name:p.name,comp:(p.lines||[]).map(c=>({item:c.item,qty:c.qty})),out:q,billed:0,returned:0});
+      sel.push({qty:q,amt:r.amt,comp:r.comp||[],dpct:r.dpct});
+    }else{
+      const it=itemMap[r.code];if(!it)throw new Error("Choose an item for each line that has a quantity.");
+      const rate=money(r.rate);if(rate<0)throw new Error(`${it.name}: rate cannot be negative.`);
+      flines.push({kind:"item",ref:r.code,name:it.name,out:q,billed:0,returned:0});
+      sel.push({qty:q,rate,dpct:r.dpct});
+    }
+  });
+  if(!flines.length)throw new Error("Add at least one line with a quantity.");
+  return billLinesFor(flines,sel,itemMap,inter,{...(opts||{}),over:true}).lines;
 }
 function billTotals(lines){
   const sum=k=>money(lines.reduce((a,l)=>a+(l[k]||0),0));
-  const taxable=sum("taxable"),cgst=sum("cgst"),sgst=sum("sgst"),igst=sum("igst");
+  const taxable=sum("taxable"),cgst=sum("cgst"),sgst=sum("sgst"),igst=sum("igst"),gross=sum("gross"),disc=sum("disc");
   const grand=money(taxable+cgst+sgst+igst),total=Math.round(grand);
-  return {taxable,cgst,sgst,igst,tax:money(cgst+sgst+igst),grand,roundOff:money(total-grand),total};
+  return {gross,disc,taxable,cgst,sgst,igst,tax:money(cgst+sgst+igst),grand,roundOff:money(total-grand),total};
 }
 const paidOf=b=>money((b.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0));
 const balanceOf=b=>money((b.total||0)-paidOf(b));
 const payStatusOf=b=>{if(b.cancelled)return "cancelled";const bal=balanceOf(b),p=paidOf(b);return bal<=0?"paid":p>0?"partial":"unpaid"};
 const billBadge=b=>{const m={paid:["Paid","ok"],partial:["Part paid","w"],unpaid:["Unpaid","w"],cancelled:["Cancelled","x"]}[b.status||payStatusOf(b)];return `<span class="badge ${m[1]}">${m[0]}</span>`};
+
 const itemsById=()=>Object.fromEntries(items.map(i=>[i.id,i]));
 const payFrom=p=>{const amount=money(p.amount);if(!(amount>0))return null;return {mode:PAYMODES.includes(p.mode)?p.mode:"Other",amount,ref:String(p.ref||"").trim(),date:p.date||today()}};
-function bdNew(){return {mode:"challan",cid:"",date:today(),inter:false,sel:[],party:"",gstin:"",addr:"",phone:"",direct:[{code:"",qty:"",rate:""}],pay:{mode:"UPI",amount:"",ref:"",date:today()}}}
-function bdDefaults(c){return c.lines.map(l=>({qty:pend(l),rate:"",amt:"",comp:[]}))}
+function bdNew(){return {mode:"challan",cid:"",date:today(),inter:false,sel:[],party:"",gstin:"",addr:"",phone:"",toPlace:"",toPincode:"",
+  direct:[{kind:"item",code:"",qty:"",rate:"",amt:"",dpct:""}],billDisc:{type:"pct",value:""},pay:{mode:"UPI",amount:"",ref:"",date:today()}}}
+function bdDefaults(c){return c.lines.map(l=>({qty:pend(l),rate:"",amt:"",comp:[],dpct:""}))}
 // What would need an exception for this challan selection?
 function challanIssues(c,sel){
   const out=[];
@@ -673,17 +739,20 @@ function challanIssues(c,sel){
   c.lines.forEach((l,i)=>{const q=Number((sel[i]||{}).qty)||0;if(q>0&&q>pend(l)+1e-9)out.push(`${l.name}: billing ${q}, only ${pend(l)} pending`)});
   return out;
 }
+const billDiscOf=b=>{const v=Number((b||{}).value)||0;if(v<=0)return null;return {type:b.type==="flat"?"flat":"pct",value:v}};
 function bdSync(){
   if(!bd)return;
   bd.date=gv("bdt")||bd.date||today();
   if($("#bint"))bd.inter=$("#bint").checked;
   if($("#pamt"))bd.pay={mode:gv("pmode")||"UPI",amount:gv("pamt"),ref:gv("pref"),date:gv("pdt2")||today()};
+  if($("#bdv"))bd.billDisc={type:gv("bdtyp")||"pct",value:gv("bdv")};
+  if($("#spl")){bd.toPlace=gv("spl");bd.toPincode=gv("spin")}
   if($("#dp")){
     bd.party=gv("dp");bd.gstin=gv("dg");bd.addr=gv("da");bd.phone=gv("dph");
-    bd.direct=bd.direct.map((_,i)=>({code:gv("di"+i),qty:gv("dq"+i),rate:gv("dr"+i)}));
+    bd.direct=bd.direct.map((_,i)=>{const v=gv("dk"+i),p=v.split("|");return {kind:p[0]==="p"?"product":"item",code:p.slice(1).join("|"),qty:gv("dq"+i),rate:gv("dr"+i),amt:gv("dm"+i),dpct:gv("dd"+i)}});
   }
   const c=challans.find(x=>x.id===bd.cid);
-  if(bd.mode==="challan"&&c&&$("#bq0")!==null)bd.sel=c.lines.map((l,i)=>({qty:gv("bq"+i),rate:gv("br"+i),amt:gv("ba"+i),comp:(l.comp||[]).map((_,j)=>gv("bc"+i+"_"+j))}));
+  if(bd.mode==="challan"&&c&&$("#bq0")!==null)bd.sel=c.lines.map((l,i)=>({qty:gv("bq"+i),rate:gv("br"+i),amt:gv("ba"+i),comp:(l.comp||[]).map((_,j)=>gv("bc"+i+"_"+j)),dpct:gv("bp"+i)}));
 }
 window.setBillMode=m=>{bdSync();bd.mode=m;draw()};
 window.pickBillChallan=()=>{
@@ -691,35 +760,61 @@ window.pickBillChallan=()=>{
   const id=gv("bcid"),c=challans.find(x=>x.id===id);
   bd.cid=id;bd.sel=c?bdDefaults(c):[];if(c)bd.inter=isInterState(company.gstin,c.gstin);draw();
 };
-window.dirAdd=()=>{bdSync();bd.direct.push({code:"",qty:"",rate:""});draw()};
-window.dirDel=i=>{bdSync();bd.direct.splice(i,1);if(!bd.direct.length)bd.direct.push({code:"",qty:"",rate:""});draw()};
-window.dirPick=i=>{bdSync();const r=bd.direct[i],it=itemsById()[r.code];if(it&&(r.rate===""||r.rate===undefined))r.rate=it.rate||"";draw()};
+window.dirAdd=()=>{bdSync();bd.direct.push({kind:"item",code:"",qty:"",rate:"",amt:"",dpct:""});draw()};
+window.dirDel=i=>{bdSync();bd.direct.splice(i,1);if(!bd.direct.length)bd.direct.push({kind:"item",code:"",qty:"",rate:"",amt:"",dpct:""});draw()};
+window.dirPick=i=>{
+  bdSync();const r=bd.direct[i];
+  if(r.kind==="item"){const it=itemsById()[r.code];if(it&&(r.rate===""||r.rate===undefined))r.rate=it.rate||""}
+  draw();
+};
+function dirOptions(sel){
+  const its=Object.values(itemsById()).sort((a,b)=>a.code.localeCompare(b.code));
+  const prods=(products||[]).slice().sort((a,b)=>a.code.localeCompare(b.code));
+  return `<option value="">Choose item or product…</option>
+    <optgroup label="Items">${its.map(i=>`<option value="i|${esc(i.id)}" ${sel==="i|"+i.id?"selected":""}>${esc(i.code+" – "+i.name)}</option>`).join("")}</optgroup>
+    <optgroup label="Products (kits)">${prods.map(p=>`<option value="p|${esc(p.code)}" ${sel==="p|"+p.code?"selected":""}>${esc(p.code+" – "+p.name)}</option>`).join("")}</optgroup>`;
+}
+function previewHtml(lines,t){
+  return `<div class="tw"><table><tr><th>Item</th><th>HSN</th><th>Qty</th><th>Rate</th><th>Gross</th><th>Discount</th><th>Taxable</th><th>GST%</th><th>Tax</th><th>Amount</th></tr>
+  ${lines.map(l=>`<tr><td style="white-space:normal">${esc(l.name)}${l.offer?`<div class="mut">${esc(l.offer)}</div>`:""}</td><td>${esc(l.hsn)}</td><td>${l.qty} ${esc(l.unit)}</td><td>${fmt(l.rate)}</td><td>${fmt(l.gross)}</td><td>${l.disc?"−"+fmt(l.disc):"–"}</td><td>${fmt(l.taxable)}</td><td>${l.gst}</td><td>${fmt(l.cgst+l.sgst+l.igst)}</td><td>${fmt(l.amount)}</td></tr>`).join("")}</table></div>
+  <div class="row" style="justify-content:flex-end"><table style="max-width:320px"><tr><td>Gross</td><td>${fmt(t.gross)}</td></tr><tr><td>Discount</td><td>−${fmt(t.disc)}</td></tr><tr><td>Taxable</td><td>${fmt(t.taxable)}</td></tr><tr><td>Tax</td><td>${fmt(t.tax)}</td></tr><tr><td>Round off</td><td>${fmt(t.roundOff)}</td></tr><tr><td><b>Total</b></td><td><b>${fmt(t.total)}</b></td></tr></table></div>`;
+}
 function billDraftView(){
-  const items=itemsById(),direct=bd.mode==="direct";
+  const direct=bd.mode==="direct",items=itemsById();
   const modeBar=`<div class="row" style="margin:0 0 8px"><button class="b ${direct?"s":""}" onclick="setBillMode('challan')">From challan</button><button class="b ${direct?"":"s"}" onclick="setBillMode('direct')">Direct bill (exception)</button></div>`;
-  const payRow=`<h2>Payment received now (optional)</h2><div class="g">
-    <div><label>Mode</label><select id="pmode">${PAYMODES.map(m=>`<option ${m===(bd.pay||{}).mode?"selected":""}>${m}</option>`).join("")}</select></div>
-    <div><label>Amount</label><input id="pamt" type="number" min="0" step="0.01" value="${esc((bd.pay||{}).amount)}"></div>
-    <div><label>UPI txn id / UTR / cheque no.</label><input id="pref" value="${esc((bd.pay||{}).ref)}"></div>
-    <div><label>Date</label><input id="pdt2" type="date" value="${esc((bd.pay||{}).date||today())}"></div></div>
-    <div class="row"><button class="b s" onclick="bdSync();draw()">Update totals</button><button class="b" onclick="saveBill()">Save bill</button><button class="b s" onclick="discardDraft('bills')">Discard</button></div></div>`;
-  const interBox=`<div class="row"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="bint" ${bd.inter?"checked":""}> Inter-state supply (IGST)</label></div>`;
   const dateBox=`<div><label>Bill date</label><input id="bdt" type="date" value="${esc(bd.date)}"></div>`;
+  const shipBox=`<div class="g" style="margin-top:8px"><div><label>Ship-to place</label><input id="spl" value="${esc(bd.toPlace)}"></div><div><label>Ship-to pincode</label><input id="spin" inputmode="numeric" value="${esc(bd.toPincode)}"></div></div>`;
+  const billDiscBox=`<div class="g" style="margin-top:8px"><div><label>Bill-level discount</label><select id="bdtyp"><option value="pct" ${(bd.billDisc||{}).type!=="flat"?"selected":""}>% of the bill</option><option value="flat" ${(bd.billDisc||{}).type==="flat"?"selected":""}>₹ off the bill</option></select></div><div><label>Discount value</label><input id="bdv" type="number" min="0" step="0.01" value="${esc((bd.billDisc||{}).value)}"></div></div>`;
+  const interBox=`<div class="row"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="bint" ${bd.inter?"checked":""}> Inter-state supply (IGST)</label></div>`;
+  const p=bd.pay||{};
+  const payRow=`<h2>Payment received now (optional)</h2><div class="g">
+    <div><label>Mode</label><select id="pmode">${PAYMODES.map(m=>`<option ${m===p.mode?"selected":""}>${m}</option>`).join("")}</select></div>
+    <div><label>Amount</label><input id="pamt" type="number" min="0" step="0.01" value="${esc(p.amount)}"></div>
+    <div><label>UPI txn id / UTR / cheque no.</label><input id="pref" value="${esc(p.ref)}"></div>
+    <div><label>Date</label><input id="pdt2" type="date" value="${esc(p.date||today())}"></div></div>
+    <div class="row"><button class="b s" onclick="bdSync();draw()">Update totals</button><button class="b" onclick="saveBill()">Save bill</button><button class="b s" onclick="discardDraft('bills')">Discard</button></div></div>`;
+  const opts={offers,date:bd.date||today(),billDisc:billDiscOf(bd.billDisc),products};
   if(direct){
-    const itemOpts=sel=>`<option value="">Choose item…</option>${Object.values(items).sort((a,b)=>a.code.localeCompare(b.code)).map(i=>`<option value="${esc(i.id)}" ${i.id===sel?"selected":""}>${esc(i.code+" – "+i.name)}</option>`).join("")}`;
     let prev="";
-    try{const ls=directLinesFor(bd.direct,items,bd.inter),t=billTotals(ls);prev=previewHtml(ls,t)}catch(e){prev=`<div class="msg e">${esc(e.message)}</div>`}
-    return `<div class="card">${modeBar}<div class="msg e" style="white-space:normal">Direct bill: no challan and no stock movement. A manager or admin must approve it before it is saved.</div>
+    try{const ls=directLinesFor(bd.direct,items,bd.inter,opts);prev=previewHtml(ls,billTotals(ls))}catch(e){prev=`<div class="msg e">${esc(e.message)}</div>`}
+    const rows=bd.direct.map((r,i)=>{
+      const isP=r.kind==="product",key=(isP?"p|":"i|")+r.code,it=isP?null:items[r.code];
+      const pr=isP?(products||[]).find(x=>x.code===r.code):null,q=Number(r.qty)||0;
+      const dflt=pr?money(pr.lines.reduce((a,c)=>a+((items[c.item]||{}).rate||0)*c.qty*q,0)):"";
+      return `<tr><td style="white-space:normal"><select id="dk${i}" onchange="dirPick(${i})">${dirOptions(key)}</select></td>
+        <td><input id="dq${i}" type="number" min="0" step="any" value="${esc(r.qty)}" style="width:80px"></td>
+        ${isP?`<td><input id="dm${i}" type="number" min="0" step="0.01" value="${esc(r.amt)}" placeholder="${dflt}" style="width:110px"><div class="mut">blank = standard price</div></td>`
+             :`<td><input id="dr${i}" type="number" min="0" step="0.01" value="${esc(r.rate)}" placeholder="${it?money(it.rate):""}" style="width:110px"></td>`}
+        <td><input id="dd${i}" type="number" min="0" max="100" step="0.01" value="${esc(r.dpct)}" placeholder="0" style="width:70px"></td>
+        <td><button class="b d" onclick="dirDel(${i})">Remove</button></td></tr>`;
+    }).join("");
+    return `<div class="card">${modeBar}<div class="msg e" style="white-space:normal">Direct bill: no challan and no stock movement. The user who saves it approves it on the exception popup.</div>
     <div class="g"><div><label>Party name</label><input id="dp" value="${esc(bd.party)}"></div><div><label>Party GSTIN</label><input id="dg" value="${esc(bd.gstin)}"></div>
     <div><label>Party phone</label><input id="dph" value="${esc(bd.phone)}"></div>${dateBox}</div>
-    <div style="margin-top:8px"><label>Party address</label><input id="da" value="${esc(bd.addr)}"></div>
-    <div class="tw" style="margin-top:8px"><table><tr><th>Item</th><th>Qty</th><th>Rate</th><th></th></tr>
-    ${bd.direct.map((r,i)=>`<tr><td><select id="di${i}" onchange="dirPick(${i})">${itemOpts(r.code)}</select></td>
-    <td><input id="dq${i}" type="number" min="0" step="any" value="${esc(r.qty)}" style="width:90px"></td>
-    <td><input id="dr${i}" type="number" min="0" step="0.01" value="${esc(r.rate)}" style="width:110px"></td>
-    <td><button class="b d" onclick="dirDel(${i})">Remove</button></td></tr>`).join("")}</table></div>
+    <div style="margin-top:8px"><label>Party address</label><input id="da" value="${esc(bd.addr)}"></div>${shipBox}
+    <div class="tw" style="margin-top:8px"><table><tr><th>Item or product</th><th>Qty</th><th>Rate / product price</th><th>Disc %</th><th></th></tr>${rows}</table></div>
     <div class="row"><button class="b s" onclick="dirAdd()">+ Add line</button></div>
-    ${interBox}${prev}${payRow}</div>`;
+    ${billDiscBox}${interBox}${prev}${payRow}</div>`;
   }
   const cs=challans.filter(c=>c.status!=="cancelled"&&c.lines.some(l=>pend(l)>0));
   const c=challans.find(x=>x.id===bd.cid);
@@ -727,48 +822,46 @@ function billDraftView(){
   if(!c)return head+`<p class="mut">Pick a challan. Only challans with quantity still to bill are listed. To bill without a challan, use a direct bill.</p></div>`;
   const issues=challanIssues(c,bd.sel);
   const rows=c.lines.map((l,i)=>{
-    const s=bd.sel[i]||{qty:pend(l),rate:"",amt:"",comp:[]},q=Number(s.qty)||0,over=q>pend(l)+1e-9;
+    const s=bd.sel[i]||{qty:pend(l),rate:"",amt:"",comp:[],dpct:""},q=Number(s.qty)||0,over=q>pend(l)+1e-9;
     const pt=`<span class="mut">pending ${pend(l)}</span>${over?` <span class="badge x">needs exception</span>`:""}`;
     if(l.kind==="product"){
       const dflt=money(l.comp.reduce((a,cc)=>a+((items[cc.item]||{}).rate||0)*cc.qty*q,0));
       return `<tr><td style="white-space:normal"><b>${esc(l.code+" – "+l.name)}</b> ${pt}<div class="mut">${esc(compText(l.comp))}</div></td>
       <td><input id="bq${i}" type="number" min="0" step="any" value="${esc(s.qty)}" style="width:80px"></td>
       <td><input id="ba${i}" type="number" min="0" step="0.01" value="${esc(s.amt)}" placeholder="${dflt}" style="width:110px"></td>
-      <td style="white-space:normal">${l.comp.map((cc,j)=>`<div>${esc(cc.item)} <input id="bc${i}_${j}" type="number" step="0.01" value="${esc((s.comp||[])[j]??"")}" placeholder="auto" style="width:90px"></div>`).join("")}</td></tr>`;
+      <td style="white-space:normal">${l.comp.map((cc,j)=>`<div>${esc(cc.item)} <input id="bc${i}_${j}" type="number" step="0.01" value="${esc((s.comp||[])[j]??"")}" placeholder="auto" style="width:90px"></div>`).join("")}</td>
+      <td><input id="bp${i}" type="number" min="0" max="100" step="0.01" value="${esc(s.dpct)}" placeholder="0" style="width:70px"></td></tr>`;
     }
     const it=items[l.ref]||{};
     return `<tr><td style="white-space:normal"><b>${esc(l.name)}</b> ${pt}</td>
       <td><input id="bq${i}" type="number" min="0" step="any" value="${esc(s.qty)}" style="width:80px"></td>
-      <td><input id="br${i}" type="number" min="0" step="0.01" value="${esc(s.rate)}" placeholder="${money(it.rate||0)}" style="width:110px"></td><td></td></tr>`;
+      <td><input id="br${i}" type="number" min="0" step="0.01" value="${esc(s.rate)}" placeholder="${money(it.rate||0)}" style="width:110px"></td><td></td>
+      <td><input id="bp${i}" type="number" min="0" max="100" step="0.01" value="${esc(s.dpct)}" placeholder="0" style="width:70px"></td></tr>`;
   }).join("");
   let prev="";
-  try{const b=billLinesFor(c.lines,bd.sel,items,bd.inter,{over:true}),t=billTotals(b.lines);prev=previewHtml(b.lines,t)}catch(e){prev=`<div class="msg e">${esc(e.message)}</div>`}
-  const warn=issues.length?`<div class="msg e" style="white-space:normal">Exception: ${esc(issues.join("; "))}. Saving asks a manager or admin to approve.</div>`:"";
-  return head+`${warn}<div class="tw"><table><tr><th>Challan line</th><th>Qty</th><th>Rate / product amount</th><th>Product split (optional)</th></tr>${rows}</table></div>
-  ${interBox}<p class="mut">Product amounts split across components by standard rate. Type an amount on a component to fix it; the rest re-splits.</p>
+  try{const b=billLinesFor(c.lines,bd.sel,items,bd.inter,{...opts,over:true});prev=previewHtml(b.lines,billTotals(b.lines))}catch(e){prev=`<div class="msg e">${esc(e.message)}</div>`}
+  const warn=issues.length?`<div class="msg e" style="white-space:normal">Exception: ${esc(issues.join("; "))}. Saving asks the user to approve it on the popup.</div>`:"";
+  return head+`${warn}<div class="tw"><table><tr><th>Challan line</th><th>Qty</th><th>Rate / product amount</th><th>Product split (optional)</th><th>Disc %</th></tr>${rows}</table></div>
+  ${shipBox}${billDiscBox}${interBox}<p class="mut">Disc % overrides any offer on that line. Offers run inside their dates (see the Offers tab).</p>
   ${prev}${payRow}</div>`;
-}
-function previewHtml(lines,t){
-  return `<div class="tw"><table><tr><th>Item</th><th>HSN</th><th>Qty</th><th>Rate</th><th>Taxable</th><th>GST%</th><th>${"Tax"}</th><th>Amount</th></tr>
-  ${lines.map(l=>`<tr><td style="white-space:normal">${esc(l.name)}</td><td>${esc(l.hsn)}</td><td>${l.qty} ${esc(l.unit)}</td><td>${fmt(l.rate)}</td><td>${fmt(l.taxable)}</td><td>${l.gst}</td><td>${fmt(l.cgst+l.sgst+l.igst)}</td><td>${fmt(l.amount)}</td></tr>`).join("")}</table></div>
-  <div class="row" style="justify-content:flex-end"><table style="max-width:300px"><tr><td>Taxable</td><td>${fmt(t.taxable)}</td></tr><tr><td>Tax</td><td>${fmt(t.tax)}</td></tr><tr><td>Round off</td><td>${fmt(t.roundOff)}</td></tr><tr><td><b>Total</b></td><td><b>${fmt(t.total)}</b></td></tr></table></div>`;
 }
 window.saveBill=async()=>{
   bdSync();
-  const items=itemsById(),direct=bd.mode==="direct";
+  const items=itemsById(),direct=bd.mode==="direct",bdisc=billDiscOf(bd.billDisc);
   const pay=bd.pay?payFrom(bd.pay):null;
   if(bd.pay&&Number(bd.pay.amount)<0)return say("Payment amount cannot be negative.",true);
+  const opts={offers,date:bd.date||today(),billDisc:bdisc,products};
   let c=null,issues=[];
   try{
     if(direct){
       if(!(bd.party||"").trim())return say("Enter the party name.",true);
-      directLinesFor(bd.direct,items,bd.inter);
+      directLinesFor(bd.direct,items,bd.inter,opts);
       issues=["direct bill with no challan"];
     }else{
       c=challans.find(x=>x.id===bd.cid);
       if(!c)return say("Choose a challan to bill, or use a direct bill.",true);
       issues=challanIssues(c,bd.sel);
-      if(!issues.length)billLinesFor(c.lines,bd.sel,items,bd.inter);
+      if(!issues.length)billLinesFor(c.lines,bd.sel,items,bd.inter,opts);
     }
   }catch(e){return err(e)}
   let ex=null;
@@ -782,13 +875,13 @@ window.saveBill=async()=>{
     await db.runTransaction(async t=>{
       const ks=await t.get(kref);
       let built,fresh=null,cref=null;
-      if(direct){built={lines:directLinesFor(bd.direct,items,bd.inter),used:[]}}
+      if(direct){built={lines:directLinesFor(bd.direct,items,bd.inter,opts),used:[]}}
       else{
         cref=D("challans/"+c.id);fresh=(await t.get(cref)).data();
         if(!fresh)throw new Error("Challan not found.");
         const now=challanIssues(fresh,bd.sel);
         if(now.length&&!ex)throw new Error("The challan changed while you were editing: "+now.join("; ")+". Review and try again.");
-        built=billLinesFor(fresh.lines,bd.sel,items,bd.inter,{over:true});
+        built=billLinesFor(fresh.lines,bd.sel,items,bd.inter,{...opts,over:true});
         if(!built.used.length)throw new Error("Enter a quantity to bill.");
       }
       const tot=billTotals(built.lines);
@@ -797,12 +890,15 @@ window.saveBill=async()=>{
       const n=((ks.exists&&ks.data().bill)||0)+1;no="INV-"+String(n).padStart(4,"0");
       const log=[{t:direct?"Direct bill created":"Bill created from "+fresh.no,by:me.name,at}];
       if(ex)log.push({t:"EXCEPTION: "+ex.type+" – "+ex.reason+" (approved by "+ex.approver+")",by:me.name,at});
+      if(tot.disc>0)log.push({t:"Discount given: "+fmt(tot.disc),by:me.name,at});
       const bill={no,date:bd.date||today(),direct,
         party:direct?bd.party.trim():(fresh.party||""),addr:direct?(bd.addr||"").trim():(fresh.addr||""),
         gstin:direct?(bd.gstin||"").trim():(fresh.gstin||""),phone:direct?(bd.phone||"").trim():(fresh.phone||""),
+        toPlace:(bd.toPlace||"").trim(),toPincode:(bd.toPincode||"").trim(),
         inter:!!bd.inter,challanIds:direct?[]:[c.id],challanNos:direct?[]:[fresh.no],lines:built.lines,
         fromLines:built.used.map(u=>({cid:c.id,li:u.li,q:u.q})),
-        ...tot,payments,paid:paidOf({payments}),cancelled:false,exception:ex,createdBy:me.name,createdUid:me.uid,at,log};
+        ...tot,billDisc:bdisc,payments,paid:paidOf({payments}),cancelled:false,exception:ex,eway:{},
+        createdBy:me.name,createdUid:me.uid,at,log};
       bill.status=payStatusOf(bill);
       if(!direct){
         const lines=fresh.lines.map((l,i)=>{const u=built.used.find(x=>x.li===i);return u?{...l,billed:rnd((l.billed||0)+u.q)}:l});
@@ -810,7 +906,7 @@ window.saveBill=async()=>{
       }
       t.set(kref,{bill:n},{merge:true});
       t.set(bref,bill);
-      t.set(O("audit").doc(),auditRec(ex?"Exception bill":"Created","Bill",no,(direct?"direct to "+bill.party:fresh.no)+" · total "+tot.total+(ex?" · "+ex.type+": "+ex.reason:"")));
+      t.set(O("audit").doc(),auditRec(ex?"Exception bill":"Created","Bill",no,(direct?"direct to "+bill.party:fresh.no)+" · total "+tot.total+(tot.disc?" · discount "+fmt(tot.disc):"")+(ex?" · "+ex.type+": "+ex.reason:"")));
     });
     bd=null;viewingBill=bref.id;await loadAll();say(`Bill ${no} saved${ex?" with exception recorded":""}.`);
   }catch(e){err(e)}
@@ -880,7 +976,7 @@ const payBlock=k=>[k.upi?`UPI: ${esc(k.upi)}`:"",k.bank?`Bank: ${esc(k.bank)}`:"
 function billsView(){
   if(viewingBill){const b=bills.find(x=>x.id===viewingBill);if(b)return billDetail(b);viewingBill=null}
   const form=canBill()?(bd?billDraftView():`<div class="card"><div class="row" style="margin:0"><button class="b" onclick="bd=bdNew();draw()">+ New bill from challan</button></div></div>`):"";
-  return form+`<div class="card"><h2>Bills (${bills.length})</h2><div class="tw"><table><tr><th>Bill no.</th><th>Date</th><th>Party</th><th>Challan</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr>
+  return form+`<div class="card"><h2>Bills (${bills.length})</h2><div class="row" style="margin:0 0 8px"><button class="b s" onclick="downloadEwayPeriod()">Download e-way file for this period</button><span class="mut">Uses the period on the Reports tab (default: this month). Bills not ready are listed, not dropped.</span></div><div class="tw"><table><tr><th>Bill no.</th><th>Date</th><th>Party</th><th>Challan</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr>
   ${bills.map(b=>`<tr style="cursor:pointer" onclick="viewingBill='${b.id}';draw()"><td><b>${esc(b.no)}</b></td><td>${dfmt(b.date)}</td><td>${esc(b.party)}</td><td>${esc((b.challanNos||[]).join(", "))}</td><td>${fmt(b.total)}</td><td>${fmt(paidOf(b))}</td><td>${fmt(balanceOf(b))}</td><td>${billBadge(b)}</td></tr>`).join("")||`<tr><td colspan="8">No bills yet. Create one from a challan.</td></tr>`}</table></div></div>`;
 }
 function billDetail(b){
@@ -895,11 +991,12 @@ function billDetail(b){
   <div><label>Payment details</label>${payBlock(k)}</div></div>
   <div class="tw"><table class="pr"><tr><th>#</th><th>Description</th><th>HSN</th><th>Qty</th><th>Rate</th><th>Taxable</th><th>GST%</th>${b.inter?"<th>IGST</th>":"<th>CGST</th><th>SGST</th>"}<th>Amount</th></tr>
   ${b.lines.map((l,i)=>`<tr><td>${i+1}</td><td style="white-space:normal">${esc(l.code+" – "+l.name)}</td><td>${esc(l.hsn)}</td><td>${l.qty} ${esc(l.unit)}</td><td>${fmt(l.rate)}</td><td>${fmt(l.taxable)}</td><td>${l.gst}</td>${b.inter?`<td>${fmt(l.igst)}</td>`:`<td>${fmt(l.cgst)}</td><td>${fmt(l.sgst)}</td>`}<td>${fmt(l.amount)}</td></tr>`).join("")}</table></div>
-  <div class="row" style="justify-content:flex-end"><table style="max-width:320px"><tr><td>Taxable</td><td>${fmt(b.taxable)}</td></tr>${b.inter?`<tr><td>IGST</td><td>${fmt(b.igst)}</td></tr>`:`<tr><td>CGST</td><td>${fmt(b.cgst)}</td></tr><tr><td>SGST</td><td>${fmt(b.sgst)}</td></tr>`}<tr><td>Round off</td><td>${fmt(b.roundOff)}</td></tr><tr><td><b>Total</b></td><td><b>${fmt(b.total)}</b></td></tr></table></div>
+  <div class="row" style="justify-content:flex-end"><table style="max-width:320px">${b.disc?`<tr><td>Gross</td><td>${fmt(b.gross)}</td></tr><tr><td>Discount</td><td>−${fmt(b.disc)}</td></tr>`:""}<tr><td>Taxable</td><td>${fmt(b.taxable)}</td></tr>${b.inter?`<tr><td>IGST</td><td>${fmt(b.igst)}</td></tr>`:`<tr><td>CGST</td><td>${fmt(b.cgst)}</td></tr><tr><td>SGST</td><td>${fmt(b.sgst)}</td></tr>`}<tr><td>Round off</td><td>${fmt(b.roundOff)}</td></tr><tr><td><b>Total</b></td><td><b>${fmt(b.total)}</b></td></tr></table></div>
   <div class="tw"><table class="pr"><tr><th>#</th><th>Date</th><th>Mode</th><th>Reference</th><th>Amount</th>${canRev?"<th class='noprint'></th>":""}</tr>
   ${(b.payments||[]).map((p,i)=>`<tr><td>${i+1}</td><td>${dfmt(p.date)}</td><td>${esc(p.mode)}</td><td>${esc(p.ref)}</td><td>${fmt(p.amount)}</td>${canRev?`<td class="noprint"><button class="b d" onclick="reversePay('${b.id}',${i})">Reverse</button></td>`:""}</tr>`).join("")||`<tr><td colspan="${canRev?6:5}">No payments yet.</td></tr>`}
   <tr><td colspan="4"><b>Balance due</b></td><td><b>${fmt(bal)}</b></td>${canRev?"<td></td>":""}</tr></table></div>
   <div class="sign"><div>Prepared by<br>${esc(b.createdBy)}</div><div></div><div>Authorised signatory</div></div></div>
+  ${ewayCard(b)}
   ${canPay?`<div class="card noprint"><h2>Record payment</h2><div class="g">
   <div><label>Mode</label><select id="pm_${b.id}">${PAYMODES.map(m=>`<option>${m}</option>`).join("")}</select></div>
   <div><label>Amount (balance ${fmt(bal)})</label><input id="pa_${b.id}" type="number" min="0" step="0.01"></div>
@@ -914,18 +1011,6 @@ function billDetail(b){
 /* ---------- EXCEPTIONS: pure rules (tested in tests/) ---------- */
 const approverProblem=(role,approverUid,meUid)=>approverUid===meUid?null:"An exception must be approved by the user who raised it.";
 const exceptionRecord=(type,reason,meU,ap,at)=>({type:String(type||"Exception"),reason:String(reason||"").trim().slice(0,300),by:meU.name,byUid:meU.uid,approver:ap.approver,approverUid:ap.approverUid,approverRole:ap.approverRole,at});
-// Direct bill (no challan): every line is typed in. Lines with no quantity are skipped.
-function directLinesFor(rows,itemsMap,inter){
-  const out=[];
-  rows.forEach(r=>{
-    const q=Number(r.qty)||0;if(q<=0)return;
-    const it=itemsMap[r.code];if(!it)throw new Error("Choose an item for each line that has a quantity.");
-    const rate=money(r.rate);if(rate<0)throw new Error(`${it.name}: rate cannot be negative.`);
-    out.push(billRow(it,r.code,q,money(q*rate),inter,null,rate));
-  });
-  if(!out.length)throw new Error("Add at least one line with a quantity.");
-  return out;
-}
 // Goods receipt against a purchase order. Quantity above what is still due is an "over" that needs an exception.
 function receiveCalc(lines,qtys){
   const rec=[],over=[],out=lines.map(l=>({...l}));
@@ -1096,6 +1181,7 @@ function poDetail(p){
   <div style="text-align:right">${poBadge(p)}<br>Date: ${dfmt(p.date)}<br>Deliver to: <b>${esc(p.whName)}</b></div></div>
   <div class="tw"><table class="pr"><tr><th>#</th><th>Item</th><th>HSN</th><th>Ordered</th><th>Received</th><th>Pending</th><th>Rate</th><th>Value</th></tr>
   ${p.lines.map((l,i)=>`<tr><td>${i+1}</td><td style="white-space:normal">${esc(l.code+" – "+l.name)}</td><td>${esc(l.hsn)}</td><td>${l.ordered} ${esc(l.unit)}</td><td>${l.received||0}</td><td>${rnd((l.ordered||0)-(l.received||0))}</td><td>${fmt(l.rate)}</td><td>${fmt((l.ordered||0)*(l.rate||0))}</td></tr>`).join("")}</table></div></div>
+  ${payableCard(p)}
   ${open&&canCreateCh()?`<div class="card noprint"><h2>Receive goods into ${esc(p.whName)}</h2><p class="mut">Quantities above what is still due need an exception approved by a manager or admin.</p>
   <div class="tw"><table><tr><th>Item</th><th>Pending</th><th>Receive now</th></tr>
   ${p.lines.map((l,i)=>`<tr><td>${esc(l.name)}</td><td>${rnd((l.ordered||0)-(l.received||0))}</td><td><input id="rq${i}" type="number" min="0" step="any" value="${Math.max(0,rnd((l.ordered||0)-(l.received||0)))}" style="width:100px"></td></tr>`).join("")}</table></div>
@@ -1109,45 +1195,10 @@ let rep={from:"",to:""};
 function repData(){
   const from=rep.from||today().slice(0,8)+"01",to=rep.to||today();
   const itemMap=itemsById(),whMap=Object.fromEntries(whs.map(w=>[w.id,w]));
-  return {from,to,sales:salesSummary(bills,from,to),recv:receivables(bills),stockRows:stockValueRows(stock,itemMap,whMap),
+  return {from,to,pay:payables(purchases),sales:salesSummary(bills,from,to),recv:receivables(bills),stockRows:stockValueRows(stock,itemMap,whMap),
     pend:pendingChallanRows(challans),exc:exceptionRows(bills,challans,stock,purchases),purch:purchaseSummary(purchases,from,to)};
 }
 window.repApply=()=>{rep={from:gv("rf"),to:gv("rt")};draw()};
-window.exportRep=k=>{
-  const d=repData();
-  const m={
-    sales:["sales-summary.csv",["Bills","Taxable","Tax","Total","Paid","Balance"],[[d.sales.count,d.sales.taxable,d.sales.tax,d.sales.total,d.sales.paid,d.sales.balance]]],
-    recv:["receivables.csv",["Party","Billed","Paid","Balance"],d.recv.map(r=>[r.party,r.billed,r.paid,r.balance])],
-    stock:["stock-value.csv",["Warehouse","Item code","Item","Qty","Rate","Value"],d.stockRows.map(r=>[r.wh,r.item,r.name,r.qty,r.rate,r.value])],
-    pend:["pending-challans.csv",["Challan","Date","Party","Pending qty"],d.pend.map(r=>[r.no,r.date,r.party,r.pending])],
-    exc:["exceptions.csv",["Kind","Ref","Date","Type","Reason","By","Approver","At"],d.exc.map(r=>[r.kind,r.ref,r.date,r.type,r.reason,r.by,r.approver,r.at?new Date(r.at).toLocaleString():""])],
-    purch:["purchases.csv",["Orders","Ordered value","Received value"],[[d.purch.count,d.purch.ordered,d.purch.received]]]
-  };
-  const [name,head,rows]=m[k];
-  const blob=new Blob([toCSV(head,rows)],{type:"text/csv"}),a=document.createElement("a");
-  a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();
-  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
-};
-function reportsView(){
-  const d=repData(),sec=(title,key,body)=>`<div class="card"><div class="row" style="margin:0 0 8px;justify-content:space-between"><h2 style="margin:0">${title}</h2><button class="b s" onclick="exportRep('${key}')">Download CSV</button></div>${body}</div>`;
-  const tbl=(head,rows)=>`<div class="tw"><table><tr>${head.map(h=>`<th>${h}</th>`).join("")}</tr>${rows.join("")||`<tr><td colspan="${head.length}">Nothing to show.</td></tr>`}</table></div>`;
-  let out=`<div class="card"><h2>Period</h2><div class="g"><div><label>From</label><input id="rf" type="date" value="${esc(d.from)}"></div><div><label>To</label><input id="rt" type="date" value="${esc(d.to)}"></div></div><div class="row"><button class="b" onclick="repApply()">Apply</button></div></div>`;
-  if(has("billing")){
-    out+=sec("Sales (bills in period)","sales",tbl(["Bills","Taxable","Tax","Total","Paid","Balance"],[`<tr><td>${d.sales.count}</td><td>${fmt(d.sales.taxable)}</td><td>${fmt(d.sales.tax)}</td><td>${fmt(d.sales.total)}</td><td>${fmt(d.sales.paid)}</td><td>${fmt(d.sales.balance)}</td></tr>`]));
-    out+=sec("Receivables (who owes you)","recv",tbl(["Party","Billed","Paid","Balance"],d.recv.map(r=>`<tr><td>${esc(r.party)}</td><td>${fmt(r.billed)}</td><td>${fmt(r.paid)}</td><td>${fmt(r.balance)}</td></tr>`)));
-  }
-  if(has("inventory")){
-    out+=sec("Stock value","stock",tbl(["Warehouse","Item","Qty","Rate","Value"],d.stockRows.map(r=>`<tr><td>${esc(r.wh)}</td><td>${esc(r.item+" – "+r.name)}</td><td>${r.qty}</td><td>${fmt(r.rate)}</td><td>${fmt(r.value)}</td></tr>`)));
-  }
-  if(has("sales")){
-    out+=sec("Challans with quantity still to bill","pend",tbl(["Challan","Date","Party","Pending qty"],d.pend.map(r=>`<tr><td>${esc(r.no)}</td><td>${dfmt(r.date)}</td><td>${esc(r.party)}</td><td>${r.pending}</td></tr>`)));
-  }
-  if(has("purchase")){
-    out+=sec("Purchases in period","purch",tbl(["Orders","Ordered value","Received value"],[`<tr><td>${d.purch.count}</td><td>${fmt(d.purch.ordered)}</td><td>${fmt(d.purch.received)}</td></tr>`]));
-  }
-  out+=sec("Exceptions (all approvals, newest first)","exc",tbl(["When","Kind","Ref","Type","Reason","By","Approved by"],d.exc.map(r=>`<tr><td>${r.at?new Date(r.at).toLocaleString():""}</td><td>${esc(r.kind)}</td><td>${esc(r.ref)}</td><td>${esc(r.type)}</td><td style="white-space:normal">${esc(r.reason)}</td><td>${esc(r.by)}</td><td>${esc(r.approver)}</td></tr>`)));
-  return out;
-}
 
 /*PURE2-BEGIN*/
 /* ---------- DRAFTS: which screens keep their state object, and how field values are keyed ---------- */
@@ -1262,26 +1313,6 @@ function checkDirectPurchase(dp,itemMap){
 /*PURE2-END*/
 
 /* ---------- EXCEPTION (the user who raised it approves it on the popup) ---------- */
-function askException(type,detail){
-  return new Promise(resolve=>{
-    const wrap=document.createElement("div");wrap.className="modal";
-    wrap.innerHTML=`<div class="mbox" role="dialog" aria-modal="true">
-      <h2>Exception</h2><p><b>${esc(type)}</b></p><p class="mut" style="white-space:normal">${esc(detail)}</p>
-      <label style="margin-top:8px">Reason (required)</label><input id="axr">
-      <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="axc"> I approve this exception as ${esc(me.name)}</label>
-      <div class="msg e" id="axm" style="display:none"></div>
-      <div class="row"><button class="b" id="axok">Approve and continue</button><button class="b s" id="axno">Cancel</button></div></div>`;
-    document.body.appendChild(wrap);
-    const done=v=>{wrap.remove();resolve(v)};
-    wrap.querySelector("#axno").onclick=()=>done(null);
-    wrap.querySelector("#axok").onclick=()=>{
-      const reason=wrap.querySelector("#axr").value.trim(),ok=wrap.querySelector("#axc").checked,msg=wrap.querySelector("#axm");
-      if(!reason||!ok){msg.textContent=!reason?"Enter the reason for the exception.":"Tick the box to approve it.";msg.style.display="block";return}
-      done(exceptionRecord(type,reason,me,{approverUid:me.uid,approver:me.name,approverRole:me.role},Date.now()));
-    };
-    wrap.querySelector("#axr").focus();
-  });
-}
 
 /* ---------- DRAFTS: unsaved work survives moving between screens and reloads (per organisation and user) ---------- */
 let dp=null,logoDraft,restorePending=false;
@@ -1444,6 +1475,302 @@ window.pickLogo=file=>{
 };
 window.clearLogo=()=>{logoDraft="";draw()};
 
+/* ---------- E-WAY BILL (bulk-upload JSON for the GST portal) ---------- */
+const EWB_VERSION="1.0.0419";   // bulk-upload template version: check this against the portal's current template
+const EWB_THRESHOLD=50000;
+const GSTIN_RE=/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+const PIN_RE=/^[1-9]\d{5}$/;
+const UQC={pcs:"PCS",pc:"PCS",piece:"PCS",nos:"NOS",no:"NOS",kg:"KGS",kgs:"KGS",bag:"BAG",btl:"BTL",bottle:"BTL",box:"BOX",ltr:"LTR",l:"LTR",litre:"LTR",mtr:"MTR",m:"MTR",set:"SET",pack:"PAC",pkt:"PAC",roll:"ROL",can:"CAN",gm:"GMS",g:"GMS",ton:"MTS"};
+const uqc=u=>UQC[String(u||"").toLowerCase().trim()]||"OTH";
+const ddmmyyyy=d=>{const m=String(d||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);return m?m[3]+"/"+m[2]+"/"+m[1]:""};
+// Problems that stop a bill going into the e-way file. Empty list = ready.
+function ewayProblems(bill,co){
+  const p=[],e=bill.eway||{};
+  if(!GSTIN_RE.test(co.gstin||""))p.push("Your company GSTIN is missing or invalid (Company & plan).");
+  if(!PIN_RE.test(String(co.pincode||"")))p.push("Your company pincode is missing (Company & plan).");
+  if(bill.gstin&&!GSTIN_RE.test(bill.gstin))p.push("Party GSTIN is invalid.");
+  if(!PIN_RE.test(String(bill.toPincode||"")))p.push("Ship-to pincode is missing or invalid.");
+  if(!(bill.lines||[]).length)p.push("Bill has no lines.");
+  (bill.lines||[]).forEach(l=>{if(!/^\d{4}(\d{2}|\d{4})?$/.test(String(l.hsn||"")))p.push(`${l.name}: HSN code is missing or invalid.`)});
+  if(!ddmmyyyy(bill.date))p.push("Bill date is missing.");
+  const big=Number(bill.total)>EWB_THRESHOLD;
+  if(big&&!e.vehicleNo&&!e.transporterId)p.push(`Value is above ₹${EWB_THRESHOLD}: enter a vehicle number or transporter ID.`);
+  if(big&&!(Number(e.distance)>0))p.push(`Value is above ₹${EWB_THRESHOLD}: enter the distance in km.`);
+  if(!bill.gstin&&bill.inter&&!e.toState)p.push("Inter-state bill to an unregistered party: enter the ship-to state code.");
+  return p;
+}
+// One bill in the portal's bulk-upload layout.
+function ewayBill(bill,co){
+  const e=bill.eway||{},fromState=stateCode(co.gstin),toState=e.toState||stateCode(bill.gstin)||fromState,inter=!!bill.inter;
+  return {
+    supplyType:"O",subSupplyType:"1",subSupplyDesc:"",docType:"INV",docNo:String(bill.no),docDate:ddmmyyyy(bill.date),
+    fromGstin:co.gstin||"",fromTrdName:co.name||"",fromAddr1:String(co.addr||"").slice(0,120),fromAddr2:"",
+    fromPlace:String(co.place||co.addr||"").slice(0,50),fromPincode:Number(co.pincode)||0,
+    actFromStateCode:Number(fromState)||0,fromStateCode:Number(fromState)||0,
+    toGstin:bill.gstin||"URP",toTrdName:bill.party||"",toAddr1:String(bill.addr||"").slice(0,120),toAddr2:"",
+    toPlace:String(bill.toPlace||"").slice(0,50),toPincode:Number(bill.toPincode)||0,
+    actToStateCode:Number(toState)||0,toStateCode:Number(toState)||0,
+    transactionType:1,totalValue:money(bill.taxable),cgstValue:money(bill.cgst),sgstValue:money(bill.sgst),igstValue:money(bill.igst),
+    cessValue:0,cessNonAdvolValue:0,otherValue:0,totInvValue:money(bill.total),
+    transporterId:e.transporterId||"",transporterName:e.transporterName||"",transDocNo:e.transDocNo||"",transDocDate:ddmmyyyy(e.transDocDate||""),
+    transMode:String(e.transMode||"1"),transDistance:String(Math.round(Number(e.distance)||0)),
+    vehicleNo:String(e.vehicleNo||"").replace(/\s/g,"").toUpperCase(),vehicleType:"R",
+    itemList:(bill.lines||[]).map((l,i)=>{
+      const g=Number(l.gst)||0;
+      return {itemNo:i+1,productName:l.name,productDesc:l.name,hsnCode:String(l.hsn||""),quantity:Number(l.qty)||0,qtyUnit:uqc(l.unit),
+        taxableAmount:money(l.taxable),sgstRate:inter?0:g/2,cgstRate:inter?0:g/2,igstRate:inter?g:0,cessRate:0,cessAdvol:0};
+    })
+  };
+}
+// Builds the file from the bills that are ready. Bills with problems are returned with their reasons, not silently dropped.
+function ewayFile(bills,co){
+  const ok=[],skipped=[];
+  bills.forEach(b=>{const p=ewayProblems(b,co);if(p.length)skipped.push({no:b.no,problems:p});else ok.push(ewayBill(b,co))});
+  return {json:{version:EWB_VERSION,billLists:ok},included:ok.length,skipped};
+}
+/* ---------- PAYABLES (what we owe suppliers) ---------- */
+// Payable on a purchase = received value plus GST, cancelled orders owe nothing.
+function purchaseTotal(p){
+  if(p.status==="cancelled")return 0;
+  return money((p.lines||[]).reduce((a,l)=>{const r=(Number(l.received)||0)*(Number(l.rate)||0);return a+r+r*(Number(l.gst)||0)/100},0));
+}
+const purchasePaid=p=>money((p.payments||[]).reduce((a,x)=>a+(Number(x.amount)||0),0));
+const payableOf=p=>money(purchaseTotal(p)-purchasePaid(p));
+function payables(ps){
+  const m={};
+  ps.filter(p=>p.status!=="cancelled").forEach(p=>{
+    const r=m[p.supplier]||(m[p.supplier]={supplier:p.supplier,billed:0,paid:0,balance:0});
+    r.billed=money(r.billed+purchaseTotal(p));r.paid=money(r.paid+purchasePaid(p));r.balance=money(r.balance+payableOf(p));
+  });
+  return Object.values(m).filter(r=>r.balance>0.004).sort((a,b)=>b.balance-a.balance);
+}
+/* ---------- COLOUR PALETTES (applied through CSS variables) ---------- */
+const PALETTES={
+  green:{name:"Forest green",pri:"#14594a",pri2:"#0e4337",bg:"#f3f5f2",head:"#e6ece8"},
+  blue:{name:"Ocean blue",pri:"#1d4f91",pri2:"#163c6f",bg:"#f2f5fa",head:"#e3eaf5"},
+  plum:{name:"Plum",pri:"#5b2a6b",pri2:"#44204f",bg:"#f7f3f8",head:"#ece3ef"},
+  terracotta:{name:"Terracotta",pri:"#9a4a2a",pri2:"#7a3820",bg:"#faf5f1",head:"#f1e6dc"},
+  slate:{name:"Slate",pri:"#334155",pri2:"#1e293b",bg:"#f4f6f8",head:"#e2e8f0"}
+};
+
+/* ---------- EXCEPTION POPUP (the user who raised it approves it) ----------
+   Positioned with explicit top/left/right/bottom so it shows on older browsers too. */
+function askException(type,detail){
+  return new Promise(resolve=>{
+    const wrap=document.createElement("div");
+    wrap.className="modal";
+    wrap.setAttribute("style","position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483000;padding:12px;overflow:auto;box-sizing:border-box");
+    wrap.innerHTML=`<div role="dialog" aria-modal="true" aria-labelledby="axh" style="background:#fff;border-radius:12px;padding:18px;max-width:460px;width:100%;color:#1d2a24;font:15px/1.45 system-ui,sans-serif;box-sizing:border-box">
+      <h2 id="axh" style="margin:0 0 8px;font-size:18px">Exception</h2>
+      <p style="margin:0 0 6px"><b>${esc(type)}</b></p>
+      <p style="margin:0 0 10px;color:#66756d;white-space:normal">${esc(detail)}</p>
+      <label for="axr" style="display:block;font-size:12px;color:#66756d;margin-bottom:2px">Reason (required)</label>
+      <input id="axr" style="width:100%;padding:9px;border:1px solid #d9e0db;border-radius:7px;font:inherit;box-sizing:border-box">
+      <label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:15px;color:#1d2a24"><input type="checkbox" id="axc" style="width:auto"> I approve this exception as ${esc((me||{}).name||"")}</label>
+      <div id="axm" role="alert" style="display:none;margin-top:10px;padding:9px 12px;border-radius:8px;background:#fbeaea;color:#b3261e"></div>
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+        <button id="axok" style="background:#14594a;color:#fff;border:0;border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer">Approve and continue</button>
+        <button id="axno" style="background:#fff;color:#14594a;border:1px solid #14594a;border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer">Cancel</button></div></div>`;
+    document.body.appendChild(wrap);
+    const msg=wrap.querySelector("#axm");
+    const done=v=>{document.removeEventListener("keydown",onKey);wrap.remove();resolve(v)};
+    const onKey=e=>{if(e.key==="Escape")done(null)};
+    document.addEventListener("keydown",onKey);
+    const tryApprove=()=>{
+      const reason=wrap.querySelector("#axr").value.trim(),ticked=wrap.querySelector("#axc").checked;
+      if(!reason){msg.textContent="Enter the reason for the exception.";msg.style.display="block";wrap.querySelector("#axr").focus();return}
+      if(!ticked){msg.textContent="Tick the box to approve it.";msg.style.display="block";return}
+      done(exceptionRecord(type,reason,me,{approverUid:me.uid,approver:me.name,approverRole:me.role},Date.now()));
+    };
+    wrap.querySelector("#axok").onclick=tryApprove;
+    wrap.querySelector("#axno").onclick=()=>done(null);
+    wrap.querySelector("#axr").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();tryApprove()}});
+    setTimeout(()=>wrap.querySelector("#axr").focus(),0);
+  });
+}
+
+/* ---------- LOOK: colour palette, page name ---------- */
+let offers=[];
+function applyLook(){
+  const p=PALETTES[(company||{}).theme]||PALETTES.green,r=document.documentElement.style;
+  r.setProperty("--pri",p.pri);r.setProperty("--pri2",p.pri2);r.setProperty("--bg",p.bg);r.setProperty("--head",p.head);
+  const name=(org&&(org.appName||org.name))||"StockBill";
+  if(document.title!==name)document.title=name;
+  ["application-name","apple-mobile-web-app-title"].forEach(n=>{
+    let m=document.querySelector(`meta[name="${n}"]`);
+    if(!m){m=document.createElement("meta");m.setAttribute("name",n);document.head.appendChild(m)}
+    m.setAttribute("content",name);
+  });
+}
+window.setAppName=id=>orgUpd(id,{appName:gv("wn_"+id).trim()},"Web page name saved.");
+
+/* ---------- OFFERS (per item or product, for a set period) ---------- */
+const targetLabel=t=>{
+  if(String(t).startsWith("prod:")){const c=t.slice(5),p=(products||[]).find(x=>x.code===c);return "Product: "+c+(p?" – "+p.name:"")}
+  const c=t.slice(5),it=itemsById()[c];return "Item: "+c+(it?" – "+it.name:"");
+};
+const offerStatus=o=>{
+  const d=today();
+  if(o.active===false)return ["Off","x"];
+  if(o.from&&d<o.from)return ["Scheduled","w"];
+  if(o.to&&d>o.to)return ["Ended","x"];
+  return ["Running","ok"];
+};
+function offersView(){
+  const its=Object.values(itemsById()).sort((a,b)=>a.code.localeCompare(b.code));
+  const ps=(products||[]).slice().sort((a,b)=>a.code.localeCompare(b.code));
+  const targets=`<option value="">Choose…</option><optgroup label="Items">${its.map(i=>`<option value="item:${esc(i.id)}">${esc(i.code+" – "+i.name)}</option>`).join("")}</optgroup><optgroup label="Products">${ps.map(p=>`<option value="prod:${esc(p.code)}">${esc(p.code+" – "+p.name)}</option>`).join("")}</optgroup>`;
+  const form=canEdit()?`<div class="card"><h2>New offer</h2><p class="mut">A discount on one item or product for a set period. A discount typed on a bill line overrides the offer for that line. Leave the end date blank for no end.</p>
+    <div class="g"><div><label>Offer name</label><input id="ofn" placeholder="e.g. Diwali 10% off rice"></div>
+    <div><label>Applies to</label><select id="oft">${targets}</select></div>
+    <div><label>Discount type</label><select id="ofk"><option value="pct">% of the line</option><option value="flat">₹ off each unit</option></select></div>
+    <div><label>Value</label><input id="ofv" type="number" min="0" step="0.01"></div>
+    <div><label>From</label><input id="off" type="date" value="${today()}"></div>
+    <div><label>To (blank = no end)</label><input id="ofto" type="date"></div></div>
+    <div class="row"><button class="b" onclick="saveOffer()">Save offer</button></div></div>`:"";
+  return form+`<div class="card"><h2>Offers (${offers.length})</h2><div class="tw"><table><tr><th>Name</th><th>Applies to</th><th>Discount</th><th>From</th><th>To</th><th>Status</th><th></th></tr>
+  ${offers.slice().sort((a,b)=>(b.at||0)-(a.at||0)).map(o=>{const [s,k]=offerStatus(o);return `<tr><td>${esc(o.name)}</td><td style="white-space:normal">${esc(targetLabel(o.target))}</td>
+    <td>${o.type==="pct"?esc(o.value)+"%":"₹"+esc(o.value)+" per unit"}</td><td>${dfmt(o.from)}</td><td>${o.to?dfmt(o.to):"no end"}</td><td><span class="badge ${k}">${s}</span></td>
+    <td>${canEdit()?`<button class="b s" onclick="toggleOffer('${esc(o.id)}',${o.active===false})">${o.active===false?"Turn on":"Turn off"}</button> <button class="b d" onclick="deleteOffer('${esc(o.id)}')">Delete</button>`:""}</td></tr>`}).join("")||`<tr><td colspan="7">No offers yet.</td></tr>`}</table></div></div>`;
+}
+window.saveOffer=async()=>{
+  const name=gv("ofn").trim(),target=gv("oft"),type=gv("ofk")||"pct",value=Number(gv("ofv")),from=gv("off"),to=gv("ofto");
+  if(!name)return say("Give the offer a name.",true);
+  if(!target)return say("Choose the item or product.",true);
+  if(!(value>0))return say("Enter a discount above zero.",true);
+  if(type==="pct"&&value>100)return say("A percentage cannot be more than 100.",true);
+  if(from&&to&&to<from)return say("The end date is before the start date.",true);
+  try{
+    await O("offers").add({name,target,type,value,from,to,active:true,createdBy:me.name,at:Date.now()});
+    await audit("Created","Offer",name,targetLabel(target)+" · "+(type==="pct"?value+"%":"₹"+value+" per unit")+(from?" · from "+from:"")+(to?" to "+to:""));
+    await loadAll();say("Offer saved.");
+  }catch(e){err(e)}
+};
+window.toggleOffer=async(id,on)=>{try{await D("offers/"+id).update({active:on});await audit(on?"Turned on":"Turned off","Offer",(offers.find(x=>x.id===id)||{}).name||id,"");await loadAll();say(on?"Offer on.":"Offer off.")}catch(e){err(e)}};
+window.deleteOffer=async id=>{
+  if(!confirm("Delete this offer? Bills already made keep their discount."))return;
+  try{const o=offers.find(x=>x.id===id)||{};await D("offers/"+id).delete();await audit("Deleted","Offer",o.name||id,"");await loadAll();say("Offer deleted.")}catch(e){err(e)}
+};
+
+/* ---------- E-WAY BILL: transport details, download, file for a period ---------- */
+function downloadJSON(name,obj){
+  const blob=new Blob([JSON.stringify(obj,null,2)],{type:"application/json"}),a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
+}
+function ewayCard(b){
+  const e=b.eway||{},can=canEdit()&&!b.cancelled,dis=can?"":"disabled",probs=ewayProblems(b,company||{});
+  const modes=[["1","Road"],["2","Rail"],["3","Air"],["4","Ship"]];
+  return `<div class="card noprint"><h2>E-way bill</h2>
+  <p class="mut">Needed when the invoice value is above ₹${EWB_THRESHOLD} (state rules can differ). Save the transport details, then download. Upload the file on the GST e-way bill portal (Bulk generation).</p>
+  ${probs.length?`<div class="msg e" style="white-space:normal">${probs.map(esc).join("<br>")}</div>`:`<div class="msg">Ready for the e-way bill file.</div>`}
+  <div class="g"><div><label>Transport mode</label><select id="ew_mode" ${dis}>${modes.map(([v,t])=>`<option value="${v}" ${(e.transMode||"1")===v?"selected":""}>${t}</option>`).join("")}</select></div>
+  <div><label>Vehicle number</label><input id="ew_veh" value="${esc(e.vehicleNo)}" ${dis}></div>
+  <div><label>Distance (km)</label><input id="ew_km" type="number" min="0" value="${esc(e.distance)}" ${dis}></div>
+  <div><label>Transporter name</label><input id="ew_tn" value="${esc(e.transporterName)}" ${dis}></div>
+  <div><label>Transporter ID (GSTIN)</label><input id="ew_ti" value="${esc(e.transporterId)}" ${dis}></div>
+  <div><label>Transport doc no. (LR / GR)</label><input id="ew_td" value="${esc(e.transDocNo)}" ${dis}></div>
+  <div><label>Ship-to state code (unregistered party)</label><input id="ew_ts" value="${esc(e.toState)}" ${dis}></div></div>
+  <div class="row"><button class="b s" onclick="saveEway('${esc(b.id)}')" ${dis}>Save transport details</button><button class="b" onclick="downloadEwayFor('${esc(b.id)}')">Download e-way JSON</button></div>
+  <p class="mut">Download uses the saved details, so save first.</p></div>`;
+}
+window.saveEway=async id=>{
+  const eway={transMode:gv("ew_mode")||"1",vehicleNo:gv("ew_veh").trim().toUpperCase(),distance:Number(gv("ew_km"))||0,transporterName:gv("ew_tn").trim(),
+    transporterId:gv("ew_ti").trim().toUpperCase(),transDocNo:gv("ew_td").trim(),toState:gv("ew_ts").trim()};
+  try{
+    const b=bills.find(x=>x.id===id)||{};
+    await D("bills/"+id).update({eway});
+    await audit("Updated","E-way",b.no||id,(eway.vehicleNo||"no vehicle")+" · "+eway.distance+" km");
+    await loadAll();say("Transport details saved.");
+  }catch(e){err(e)}
+};
+window.downloadEwayFor=id=>{
+  const b=bills.find(x=>x.id===id);if(!b)return;
+  const f=ewayFile([b],company||{});
+  if(!f.included)return say("Not ready: "+f.skipped[0].problems.join(" "),true);
+  downloadJSON("eway-"+b.no+".json",f.json);
+};
+window.downloadEwayPeriod=()=>{
+  const from=rep.from||today().slice(0,8)+"01",to=rep.to||today();
+  const list=bills.filter(b=>!b.cancelled&&inRange(b.date,from,to));
+  if(!list.length)return say("No bills in this period.",true);
+  const f=ewayFile(list,company||{});
+  if(!f.included)return say(`None of the ${list.length} bill(s) is ready. Open each one and fill in the missing details.`,true);
+  downloadJSON(`eway-${from}-to-${to}.json`,f.json);
+  if(f.skipped.length)say(`${f.included} bill(s) downloaded. Not included: ${f.skipped.map(s=>s.no).join(", ")}. Open them and fill in the missing details.`);
+};
+
+/* ---------- PAYABLES: what we owe suppliers ---------- */
+function payableCard(p){
+  const total=purchaseTotal(p),paid=purchasePaid(p),bal=payableOf(p),can=canCreateCh()&&p.status!=="cancelled"&&bal>0.004;
+  return `<div class="card noprint"><h2>Payable to ${esc(p.supplier)}</h2><div class="g">
+    <div><label>Total (with GST)</label><b>${fmt(total)}</b></div><div><label>Paid</label><b>${fmt(paid)}</b></div>
+    <div><label>Balance payable</label><b class="pay">${fmt(bal)}</b></div></div>
+    ${(p.payments||[]).length?`<div class="tw" style="margin-top:8px"><table><tr><th>Date</th><th>Mode</th><th>Reference</th><th>Amount</th></tr>${(p.payments||[]).map(x=>`<tr><td>${dfmt(x.date)}</td><td>${esc(x.mode)}</td><td>${esc(x.ref)}</td><td>${fmt(x.amount)}</td></tr>`).join("")}</table></div>`:""}
+    ${can?`<div class="g" style="margin-top:8px"><div><label>Mode</label><select id="sp_m">${PAYMODES.map(m=>`<option>${m}</option>`).join("")}</select></div><div><label>Amount</label><input id="sp_a" type="number" min="0" step="0.01"></div><div><label>UTR / cheque / UPI ref</label><input id="sp_r"></div><div><label>Date</label><input id="sp_d" type="date" value="${today()}"></div></div><div class="row"><button class="b" onclick="addSupplierPay('${esc(p.id)}')">Record payment to supplier</button></div>`:""}
+  </div>`;
+}
+window.addSupplierPay=async id=>{
+  const amount=money(gv("sp_a")),mode=gv("sp_m")||"NEFT/RTGS",ref=gv("sp_r").trim(),date=gv("sp_d")||today();
+  if(!(amount>0))return say("Enter an amount above zero.",true);
+  try{
+    await db.runTransaction(async t=>{
+      const r=D("purchases/"+id),d=(await t.get(r)).data();
+      if(!d)throw new Error("Purchase not found.");
+      if(d.status==="cancelled")throw new Error("This purchase is cancelled.");
+      const bal=payableOf(d);
+      if(amount>bal+0.005)throw new Error(`Amount is more than the balance payable of ${fmt(bal)}.`);
+      const payments=[...(d.payments||[]),{mode,amount,ref,date,by:me.name,at:Date.now()}];
+      t.update(r,{payments,log:[...(d.log||[]),{t:"Paid supplier "+mode+" "+fmt(amount),by:me.name,at:Date.now()}]});
+      t.set(O("audit").doc(),auditRec("Supplier payment","Purchase",d.no,mode+" "+fmt(amount)+(ref?" · "+ref:"")));
+    });
+    await loadAll();say("Supplier payment recorded.");
+  }catch(e){err(e)}
+};
+
+/* ---------- REPORTS: receivables in one colour, payables in another ---------- */
+window.exportRep=k=>{
+  const d=repData();
+  const m={
+    sales:["sales-summary.csv",["Bills","Taxable","Tax","Total","Paid","Balance"],[[d.sales.count,d.sales.taxable,d.sales.tax,d.sales.total,d.sales.paid,d.sales.balance]]],
+    recv:["receivables.csv",["Party","Billed","Paid","Balance"],d.recv.map(r=>[r.party,r.billed,r.paid,r.balance])],
+    pay:["payables.csv",["Supplier","Billed (with GST)","Paid","Balance"],d.pay.map(r=>[r.supplier,r.billed,r.paid,r.balance])],
+    stock:["stock-value.csv",["Warehouse","Item code","Item","Qty","Rate","Value"],d.stockRows.map(r=>[r.wh,r.item,r.name,r.qty,r.rate,r.value])],
+    pend:["pending-challans.csv",["Challan","Date","Party","Pending qty"],d.pend.map(r=>[r.no,r.date,r.party,r.pending])],
+    exc:["exceptions.csv",["Kind","Ref","Date","Type","Reason","By","Approver","At"],d.exc.map(r=>[r.kind,r.ref,r.date,r.type,r.reason,r.by,r.approver,r.at?new Date(r.at).toLocaleString():""])],
+    purch:["purchases.csv",["Orders","Ordered value","Received value"],[[d.purch.count,d.purch.ordered,d.purch.received]]]
+  };
+  const [name,head,rows]=m[k];
+  const blob=new Blob([toCSV(head,rows)],{type:"text/csv"}),a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
+};
+function reportsView(){
+  const d=repData();
+  const sec=(title,cls,key,body)=>`<div class="card"><div class="row" style="margin:0 0 8px;justify-content:space-between"><h2 class="${cls}" style="margin:0">${title}</h2><button class="b s" onclick="exportRep('${key}')">Download CSV</button></div>${body}</div>`;
+  const tbl=(head,rows)=>`<div class="tw"><table><tr>${head.map(h=>`<th>${h}</th>`).join("")}</tr>${rows.join("")||`<tr><td colspan="${head.length}">Nothing to show.</td></tr>`}</table></div>`;
+  const tile=(label,val,cls)=>`<div style="flex:1;min-width:150px"><div class="mut">${label}</div><div class="${cls}" style="font-size:22px;font-weight:700">${val}</div></div>`;
+  const recvTotal=money(d.recv.reduce((a,r)=>a+r.balance,0)),payTotal=money(d.pay.reduce((a,r)=>a+r.balance,0));
+  let out=`<div class="card"><h2>Period</h2><div class="g"><div><label>From</label><input id="rf" type="date" value="${esc(d.from)}"></div><div><label>To</label><input id="rt" type="date" value="${esc(d.to)}"></div></div><div class="row"><button class="b" onclick="repApply()">Apply</button></div></div>`;
+  out+=`<div class="card"><div class="row" style="margin:0;gap:24px">${tile("Receivable (customers owe you)",fmt(recvTotal),"recv")}${tile("Payable (you owe suppliers)",fmt(payTotal),"pay")}${tile("Net",fmt(money(recvTotal-payTotal)),"")}</div></div>`;
+  if(has("billing")){
+    out+=sec("Sales (bills in period)","","sales",tbl(["Bills","Taxable","Tax","Total","Paid","Balance"],[`<tr><td>${d.sales.count}</td><td>${fmt(d.sales.taxable)}</td><td>${fmt(d.sales.tax)}</td><td>${fmt(d.sales.total)}</td><td>${fmt(d.sales.paid)}</td><td class="recv">${fmt(d.sales.balance)}</td></tr>`]));
+    out+=sec("Receivables – customers who owe you","recv","recv",tbl(["Party","Billed","Paid","Balance"],d.recv.map(r=>`<tr><td>${esc(r.party)}</td><td>${fmt(r.billed)}</td><td>${fmt(r.paid)}</td><td class="recv"><b>${fmt(r.balance)}</b></td></tr>`)));
+  }
+  if(has("purchase")){
+    out+=sec("Payables – suppliers you owe","pay","pay",tbl(["Supplier","Billed (with GST)","Paid","Balance"],d.pay.map(r=>`<tr><td>${esc(r.supplier)}</td><td>${fmt(r.billed)}</td><td>${fmt(r.paid)}</td><td class="pay"><b>${fmt(r.balance)}</b></td></tr>`)));
+    out+=sec("Purchases in period","","purch",tbl(["Orders","Ordered value","Received value"],[`<tr><td>${d.purch.count}</td><td>${fmt(d.purch.ordered)}</td><td>${fmt(d.purch.received)}</td></tr>`]));
+  }
+  if(has("inventory")){
+    out+=sec("Stock value","","stock",tbl(["Warehouse","Item","Qty","Rate","Value"],d.stockRows.map(r=>`<tr><td>${esc(r.wh)}</td><td>${esc(r.item+" – "+r.name)}</td><td>${r.qty}</td><td>${fmt(r.rate)}</td><td>${fmt(r.value)}</td></tr>`)));
+  }
+  if(has("sales")){
+    out+=sec("Challans with quantity still to bill","","pend",tbl(["Challan","Date","Party","Pending qty"],d.pend.map(r=>`<tr><td>${esc(r.no)}</td><td>${dfmt(r.date)}</td><td>${esc(r.party)}</td><td>${r.pending}</td></tr>`)));
+  }
+  out+=sec("Exceptions (all approvals, newest first)","","exc",tbl(["When","Kind","Ref","Type","Reason","By","Approved by"],d.exc.map(r=>`<tr><td>${r.at?new Date(r.at).toLocaleString():""}</td><td>${esc(r.kind)}</td><td>${esc(r.ref)}</td><td>${esc(r.type)}</td><td style="white-space:normal">${esc(r.reason)}</td><td>${esc(r.by)}</td><td>${esc(r.approver)}</td></tr>`)));
+  return out;
+}
+
 /* ---------- AUDIT LOG VIEW (organisation admins) ---------- */
 let auditRows=[],auditFilter={entity:"",who:""};
 window.loadAudit=async()=>{
@@ -1469,6 +1796,7 @@ function companyView(){
   <div><label>Company name</label><input id="kn" value="${esc(k.name)}"></div><div><label>Phone</label><input id="kph" value="${esc(k.phone)}"></div>
   <div><label>GSTIN</label><input id="kg" value="${esc(k.gstin)}"></div></div>
   <div style="margin-top:8px"><label>Address</label><input id="ka" value="${esc(k.addr)}"></div>
+  <div class="g" style="margin-top:8px"><div><label>Pincode</label><input id="kpin" inputmode="numeric" value="${esc(k.pincode)}"></div><div><label>City / place</label><input id="kplace" value="${esc(k.place)}"></div><div><label>Colour palette (applies to the whole app)</label><select id="kthm">${Object.entries(PALETTES).map(([key,p])=>`<option value="${key}" ${(k.theme||"green")===key?"selected":""}>${esc(p.name)}</option>`).join("")}</select></div></div>
   <div class="g" style="margin-top:8px"><div><label>UPI ID</label><input id="kupi" value="${esc(k.upi)}"></div><div><label>Bank name</label><input id="kbank" value="${esc(k.bank)}"></div><div><label>Account no.</label><input id="kacct" value="${esc(k.acct)}"></div><div><label>IFSC</label><input id="kifsc" value="${esc(k.ifsc)}"></div></div>
   <div style="margin-top:10px"><label>Company logo (PNG or JPG; it is resized to 256 px)</label>
   <div class="row">${(logoDraft!==undefined?logoDraft:k.logo)?`<img src="${logoDraft!==undefined?logoDraft:k.logo}" alt="logo" style="height:56px;border:1px solid #ddd;border-radius:6px;padding:4px;background:#fff">`:`<span class="mut">No logo yet</span>`}
@@ -1479,7 +1807,7 @@ function companyView(){
   <div class="tw"><table>${Object.entries(MODS).map(([k,m])=>`<tr><td>${m.label}${m.soon?" <span class='mut'>(coming soon)</span>":""}</td><td class="mut" style="white-space:normal">${m.desc}</td><td>${has(k)?"<span class='badge ok'>Active</span>":"<span class='badge'>Not in plan</span>"}</td></tr>`).join("")}</table></div></div>`;
 }
 window.saveCompany=async()=>{
-  try{const nm=gv("kn").trim();await D("settings/company").set({name:nm,phone:gv("kph").trim(),gstin:gv("kg").trim(),addr:gv("ka").trim(),upi:gv("kupi").trim(),bank:gv("kbank").trim(),acct:gv("kacct").trim(),ifsc:gv("kifsc").trim(),logo:(logoDraft!==undefined?logoDraft:(company||{}).logo)||null});await audit("Saved","Company",nm,"company details");logoDraft=undefined;await loadAll();say("Company details saved.")}catch(e){err(e)}
+  try{const nm=gv("kn").trim();await D("settings/company").set({name:nm,phone:gv("kph").trim(),gstin:gv("kg").trim(),addr:gv("ka").trim(),upi:gv("kupi").trim(),bank:gv("kbank").trim(),acct:gv("kacct").trim(),ifsc:gv("kifsc").trim(),pincode:gv("kpin").trim(),place:gv("kplace").trim(),theme:gv("kthm")||"green",logo:(logoDraft!==undefined?logoDraft:(company||{}).logo)||null});await audit("Saved","Company",nm,"company details");logoDraft=undefined;await loadAll();say("Company details saved.")}catch(e){err(e)}
 };
 
 /* ---------- PLATFORM CONSOLE (platform owner only) ---------- */
@@ -1488,7 +1816,7 @@ const modBox=(o,k)=>`<label class="chk"><input type="checkbox" ${o.modules&&o.mo
 function orgsView(){
   const mk=Object.entries(MODS);
   return `<div class="card"><h2>New organisation (customer)</h2><div class="g">
-  <div><label>Organisation name</label><input id="on"></div><div><label>Admin name</label><input id="oan"></div>
+  <div><label>Organisation name</label><input id="on"></div><div><label>Web page name (browser tab and installed app)</label><input id="oweb" placeholder="e.g. Sri Traders Stock"></div><div><label>Admin name</label><input id="oan"></div>
   <div><label>Admin email</label><input id="oae" type="email"></div><div><label>Temporary password (6+)</label><input id="oap"></div></div>
   <h3>Modules purchased</h3><div class="mods">${mk.map(([k,m])=>`<label class="chk"><input type="checkbox" id="nm_${k}" ${m.dflt?"checked":""}> ${m.label}${m.soon?" <span class='mut'>(soon)</span>":""}</label>`).join("")}</div>
   <p class="mut">Modules that need others switch those on automatically (e.g. Sales needs Inventory and Warehouse).</p>
@@ -1496,6 +1824,8 @@ function orgsView(){
   ${orgsList.map(o=>`<div class="card"><h2>${esc(o.name)} ${o.active===false?"<span class='badge x'>Suspended</span>":"<span class='badge ok'>Active</span>"}</h2>
   <div class="mods">${Object.keys(MODS).map(k=>modBox(o,k)).join("")}</div>
   <div class="g" style="margin-top:8px"><div><label>Valid until (blank = no expiry)</label><input type="date" value="${ymd(o.validUntil)}" onchange="setValid('${o.id}',this.value)"></div></div>
+  <div class="g" style="margin-top:8px"><div><label>Web page name</label><input id="wn_${o.id}" value="${esc(o.appName||o.name)}"></div></div>
+  <div class="row"><button class="b s" onclick="setAppName('${o.id}')">Save web page name</button></div>
   <div class="row"><button class="b" onclick="enterOrg('${o.id}')">Open</button><button class="b s" onclick="setAll('${o.id}',true)">Enable all</button><button class="b s" onclick="setAll('${o.id}',false)">Disable all</button>
   <button class="b ${o.active===false?"":"d"}" onclick="setActive('${o.id}',${o.active===false})">${o.active===false?"Reactivate":"Suspend organisation"}</button></div></div>`).join("")||`<div class="card mut">No organisations yet.</div>`}
   <div class="card"><h2>Import data from the old single-company version</h2><p class="mut">Copies items, warehouses, stock, products, challans, company details, counters and users into one organisation. Safe to re-run. Skip this if you are starting fresh.</p>
@@ -1510,7 +1840,7 @@ window.createOrg=async()=>{
     sec=firebase.initializeApp(CFG,"sec"+Date.now());
     const c=await sec.auth().createUserWithEmailAndPassword(ae,ap);await sec.auth().signOut();
     const ref=db.collection("orgs").doc(),b=db.batch();
-    b.set(ref,{name,active:true,modules,validUntil:0,createdAt:Date.now()});
+    b.set(ref,{name,appName:gv("oweb").trim()||name,active:true,modules,validUntil:0,createdAt:Date.now()});
     b.set(db.doc("orgs/"+ref.id+"/users/"+c.user.uid),{name:an,email:ae,role:"admin"});
     b.set(db.doc("userOrg/"+c.user.uid),{orgId:ref.id});
     await b.commit();await auditTo(ref.id,"Created","Organisation",name,"admin "+ae+" · modules: "+Object.keys(modules).filter(k=>modules[k]).join(", "));await loadOrgs();say(`${name} created. Give ${ae} the temporary password.`);
