@@ -1,6 +1,6 @@
 // StockBill service worker: caches the app shell so it opens offline-ish.
 // Firestore and Firebase traffic is cross-origin and is never cached. Data writes still need a connection.
-const CACHE = "stockbill-v6";
+const CACHE = "stockbill-v7";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
