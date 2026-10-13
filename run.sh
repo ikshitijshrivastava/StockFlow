@@ -11,5 +11,6 @@ node tests/static_check.js index.html
 node tests/test_logic.js
 node tests/test_billing.js
 node tests/test_exceptions.js
+node tests/test_invoice.js
 rm -f app.js
 echo "ALL CHECKS PASSED"
