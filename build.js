@@ -8,7 +8,6 @@ const required = ['index.html', 'sw.js', 'manifest.webmanifest', 'icon-192.png',
 const missing = required.filter(f => !fs.existsSync(f));
 if (missing.length) {
   console.error('Missing files in the repository root: ' + missing.join(', '));
-  console.error('Upload them to the top level of the repository (not in a folder), then retry.');
   process.exit(1);
 }
 
@@ -23,8 +22,8 @@ required.forEach(f => fs.copyFileSync(f, path.join('dist', f)));
   if (brand && fs.existsSync(src)) fs.copyFileSync(src, path.join('dist', f));
 });
 
-// Customer's page title
-const html = fs.readFileSync('index.html', 'utf8').replace(/<title>[^<]*<\/title>/, `<title>${name}</title>`);
+// Replace every visible "StockBill" in the app (browser tab, login heading, header fallback)
+const html = fs.readFileSync('index.html', 'utf8').replace(/StockBill/g, name);
 fs.writeFileSync(path.join('dist', 'index.html'), html);
 
 // Customer's installed-app name
